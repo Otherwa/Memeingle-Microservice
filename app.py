@@ -7,6 +7,7 @@ from sklearn.metrics.pairwise import cosine_similarity
 from sklearn.preprocessing import MultiLabelBinarizer
 from fastapi.middleware.cors import CORSMiddleware
 import random
+from typing import List
 
 """
 Memeingle API
@@ -114,17 +115,18 @@ def get_top_n_similar_users(user_id, n=5):
     return similar_users
 
 
-def recommend_memes(user_id, top_n=10):
-
+def recommend_memes(user_id: str, top_n: int = 10) -> List[str]:
     user_similarity_df, user_item_matrix = load_user_similarity_matrix()
 
     if user_id not in user_item_matrix.index:
         raise HTTPException(status_code=404, detail="User not found")
+
     # Find similar users
     similar_users = get_top_n_similar_users(user_id)
 
     # Aggregate memes liked by similar users
     meme_scores = user_item_matrix.loc[similar_users].sum().sort_values(ascending=False)
+
     # Filter out memes the user has already liked
     liked_memes = set(
         user_item_matrix.loc[user_id][user_item_matrix.loc[user_id] == 1].index
@@ -139,16 +141,24 @@ def recommend_memes(user_id, top_n=10):
         meme_scores = (
             user_item_matrix.loc[similar_users].sum().sort_values(ascending=False)
         )
-        recommendations = [
+        new_recommendations = [
             meme for meme in meme_scores.index if meme not in liked_memes
         ]
+        recommendations = list(
+            dict.fromkeys(recommendations + new_recommendations)
+        )  # Remove duplicates and preserve order
 
     # Fill up with random memes from the collection if necessary
-    remaining_count = top_n - len(recommendations)
-    random_memes = list(MEMES.aggregate([{"$sample": {"size": remaining_count}}]))
-    random_memes = [str(meme["_id"]) for meme in random_memes]
-
-    recommendations += random_memes
+    print(recommendations)
+    if len(recommendations) < top_n:
+        remaining_count = top_n - len(recommendations)
+        random_memes = list(MEMES.aggregate([{"$sample": {"size": remaining_count}}]))
+        random_memes = [
+            str(meme["_id"])
+            for meme in random_memes
+            if str(meme["_id"]) not in liked_memes
+        ]
+        recommendations += random_memes
 
     return recommendations[:top_n]
 
