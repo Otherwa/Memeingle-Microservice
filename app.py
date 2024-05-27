@@ -219,12 +219,54 @@ async def user_similarity(user_id1: str, user_id2: str):
         or str_user_id2 not in user_similarity_df.index
     ):
         raise HTTPException(status_code=404, detail="User not found")
+
     similarity_score = user_similarity_df.loc[str_user_id1, str_user_id2]
+
     return {
         "user_id1": str_user_id1,
         "user_id2": str_user_id2,
         "similarity_score": similarity_score,
     }
+
+
+@app.get(
+    "/similar/{user_id}",
+    summary="Get similarity between two users",
+    description="Returns the similarity score between two users based on their liked memes.",
+)
+async def similar_users(user_id: str):
+    # Calculate cosine similarities between users
+    user_item_matrix = load_user_similarity_matrix()[1]
+
+    user_similarity = cosine_similarity(user_item_matrix)
+    user_similarity_df = pd.DataFrame(
+        user_similarity, index=user_item_matrix.index, columns=user_item_matrix.index
+    )
+
+    print(user_similarity_df)
+
+    str_user_id = str(user_id).strip()
+
+    if str_user_id not in user_similarity_df.index:
+        raise HTTPException(status_code=404, detail="User not found")
+
+    similarity_score_users = user_similarity_df.loc[str_user_id, :]
+
+    # Sort the similarity scores in descending order and get the top 5 users
+
+    top_5_similar_users = similarity_score_users.sort_values(ascending=False).head(
+        6
+    )  # head(6) to exclude the user itself
+
+    # Exclude the user itself from the top similar users
+    top_5_similar_users = top_5_similar_users[
+        top_5_similar_users.index != str_user_id
+    ].head(5)
+
+    # Return the top 5 similar users and their similarity scores
+    result = {"user": str_user_id, "data": top_5_similar_users.to_dict()}
+
+    return result
 
 
 if __name__ == "__main__":
