@@ -94,6 +94,7 @@ def load_user_similarity_matrix():
         index=user_likes.keys(),
         columns=mlb.classes_,
     )
+
     # Calculate cosine similarities between users
     user_similarity = cosine_similarity(user_item_matrix)
     user_similarity_df = pd.DataFrame(
@@ -115,7 +116,7 @@ def get_top_n_similar_users(user_id, n=5):
     return similar_users
 
 
-def recommend_memes(user_id: str, top_n: int = 10) -> List[str]:
+def recommend_memes(user_id: str, top_n: int = 3) -> List[str]:
     user_similarity_df, user_item_matrix = load_user_similarity_matrix()
 
     if user_id not in user_item_matrix.index:
@@ -149,7 +150,6 @@ def recommend_memes(user_id: str, top_n: int = 10) -> List[str]:
         )  # Remove duplicates and preserve order
 
     # Fill up with random memes from the collection if necessary
-    print(recommendations)
     if len(recommendations) < top_n:
         remaining_count = top_n - len(recommendations)
         random_memes = list(MEMES.aggregate([{"$sample": {"size": remaining_count}}]))
@@ -160,7 +160,33 @@ def recommend_memes(user_id: str, top_n: int = 10) -> List[str]:
         ]
         recommendations += random_memes
 
-    return recommendations[:top_n]
+    # Ensure there are at least 3 recommendations
+    if len(recommendations) < top_n:
+        random_memes = list(
+            MEMES.aggregate([{"$sample": {"size": top_n - len(recommendations)}}])
+        )
+        random_memes = [
+            str(meme["_id"])
+            for meme in random_memes
+            if str(meme["_id"]) not in liked_memes
+        ]
+        recommendations += random_memes
+
+    # Return only 3 recommended memes and fill the rest with random memes
+    final_recommendations = recommendations[:3]
+
+    if len(final_recommendations) < top_n:
+        remaining_count = top_n - len(final_recommendations)
+        random_memes = list(MEMES.aggregate([{"$sample": {"size": remaining_count}}]))
+        random_memes = [
+            str(meme["_id"])
+            for meme in random_memes
+            if str(meme["_id"]) not in liked_memes
+            and str(meme["_id"]) not in final_recommendations
+        ]
+        final_recommendations += random_memes
+
+    return final_recommendations[:top_n]
 
 
 @app.get(
