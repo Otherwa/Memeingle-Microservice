@@ -70,7 +70,7 @@ app.add_middleware(
 )
 
 
-# Connect to MongoDB
+# ? Connect to MongoDB
 client = MongoClient(
     "mongodb+srv://atharvdesai:ahrAA7kOTdZfyur9@cluster0.smf3kdb.mongodb.net/Memeingle?retryWrites=true&w=majority&appName=Cluster0"
 )
@@ -81,13 +81,13 @@ USERS = db["users"]
 
 
 def load_user_similarity_matrix():
-    # Load user-item interaction data
+    # ? Load user-item interaction data
     cursor = USERS.find({}, {"_id": 1, "liked": 1})
     user_likes = {
         str(doc["_id"]): [str(like) for like in doc.get("liked", [])] for doc in cursor
     }
 
-    # Convert to user-item matrix
+    # ? Convert to user-item matrix
     mlb = MultiLabelBinarizer()
     user_item_matrix = pd.DataFrame(
         mlb.fit_transform(user_likes.values()),
@@ -95,7 +95,7 @@ def load_user_similarity_matrix():
         columns=mlb.classes_,
     )
 
-    # Calculate cosine similarities between users
+    # ? Calculate cosine similarities between users
     user_similarity = cosine_similarity(user_item_matrix)
     user_similarity_df = pd.DataFrame(
         user_similarity, index=user_item_matrix.index, columns=user_item_matrix.index
@@ -116,7 +116,7 @@ def get_top_n_similar_users(user_id, n=5):
     return similar_users
 
 
-def recommend_memes(user_id: str, top_n: int = 3) -> List[str]:
+def recommend_memes(user_id: str, top_n: int = 13) -> List[str]:
     user_similarity_df, user_item_matrix = load_user_similarity_matrix()
 
     if user_id not in user_item_matrix.index:
@@ -135,8 +135,8 @@ def recommend_memes(user_id: str, top_n: int = 3) -> List[str]:
     recommendations = [meme for meme in meme_scores.index if meme not in liked_memes]
 
     # If not enough recommendations, widen the pool of similar users
-    similar_user_count = 5
-    while len(recommendations) < top_n and similar_user_count < len(user_similarity_df):
+    similar_user_count = 13
+    while len(recommendations) < 6 and similar_user_count < len(user_similarity_df):
         similar_user_count += 5
         similar_users = get_top_n_similar_users(user_id, n=similar_user_count)
         meme_scores = (
@@ -149,42 +149,33 @@ def recommend_memes(user_id: str, top_n: int = 3) -> List[str]:
             dict.fromkeys(recommendations + new_recommendations)
         )  # Remove duplicates and preserve order
 
-    # Fill up with random memes from the collection if necessary
-    if len(recommendations) < top_n:
-        remaining_count = top_n - len(recommendations)
-        random_memes = list(MEMES.aggregate([{"$sample": {"size": remaining_count}}]))
-        random_memes = [
-            str(meme["_id"])
-            for meme in random_memes
-            if str(meme["_id"]) not in liked_memes
-        ]
-        recommendations += random_memes
+    # Ensure there are at least 6 recommendations
+    recommendations = recommendations[:6]
 
-    # Ensure there are at least 3 recommendations
-    if len(recommendations) < top_n:
-        random_memes = list(
-            MEMES.aggregate([{"$sample": {"size": top_n - len(recommendations)}}])
-        )
-        random_memes = [
-            str(meme["_id"])
-            for meme in random_memes
-            if str(meme["_id"]) not in liked_memes
-        ]
-        recommendations += random_memes
+    # Fill up with random memes from the collection to make a total of 13 memes
+    remaining_count = top_n - len(recommendations)
+    random_memes = list(MEMES.aggregate([{"$sample": {"size": remaining_count}}]))
+    random_memes = [
+        str(meme["_id"])
+        for meme in random_memes
+        if str(meme["_id"]) not in liked_memes
+        and str(meme["_id"]) not in recommendations
+    ]
 
-    # Return only 3 recommended memes and fill the rest with random memes
-    final_recommendations = recommendations[:3]
+    final_recommendations = recommendations + random_memes
 
+    # Ensure there are at least 13 memes
     if len(final_recommendations) < top_n:
-        remaining_count = top_n - len(final_recommendations)
-        random_memes = list(MEMES.aggregate([{"$sample": {"size": remaining_count}}]))
-        random_memes = [
+        additional_random_memes = list(
+            MEMES.aggregate([{"$sample": {"size": top_n - len(final_recommendations)}}])
+        )
+        additional_random_memes = [
             str(meme["_id"])
-            for meme in random_memes
+            for meme in additional_random_memes
             if str(meme["_id"]) not in liked_memes
             and str(meme["_id"]) not in final_recommendations
         ]
-        final_recommendations += random_memes
+        final_recommendations += additional_random_memes
 
     return final_recommendations[:top_n]
 
@@ -217,7 +208,7 @@ async def list_user():
     description="Returns the top 10 meme recommendations for the specified user based on collaborative filtering.",
 )
 async def get_recommendations(user_id: str):
-    recommendations = recommend_memes(user_id.strip(), top_n=10)
+    recommendations = recommend_memes(user_id.strip(), top_n=13)
     return {"user_id": user_id.strip(), "recommendations": recommendations}
 
 
@@ -227,7 +218,7 @@ async def get_recommendations(user_id: str):
     description="Returns the similarity score between two users based on their liked memes.",
 )
 async def user_similarity(user_id1: str, user_id2: str):
-    # Calculate cosine similarities between users
+    # ? Calculate cosine similarities between users
     user_item_matrix = load_user_similarity_matrix()[1]
 
     user_similarity = cosine_similarity(user_item_matrix)
@@ -261,7 +252,7 @@ async def user_similarity(user_id1: str, user_id2: str):
     description="Returns the similarity score between two users based on their liked memes.",
 )
 async def similar_users(user_id: str):
-    # Calculate cosine similarities between users
+    # ? Calculate cosine similarities between users
     user_item_matrix = load_user_similarity_matrix()[1]
 
     user_similarity = cosine_similarity(user_item_matrix)
@@ -278,18 +269,18 @@ async def similar_users(user_id: str):
 
     similarity_score_users = user_similarity_df.loc[str_user_id, :]
 
-    # Sort the similarity scores in descending order and get the top 5 users
+    # ? Sort the similarity scores in descending order and get the top 5 users
 
     top_5_similar_users = similarity_score_users.sort_values(ascending=False).head(
         6
-    )  # head(6) to exclude the user itself
+    )  # ? head(6) to exclude the user itself
 
-    # Exclude the user itself from the top similar users
+    # ? Exclude the user itself from the top similar users
     top_5_similar_users = top_5_similar_users[
         top_5_similar_users.index != str_user_id
     ].head(5)
 
-    # Return the top 5 similar users and their similarity scores
+    # ? Return the top 5 similar users and their similarity scores
     result = {"user": str_user_id, "data": top_5_similar_users.to_dict()}
 
     return result
