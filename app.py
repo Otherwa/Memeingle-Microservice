@@ -6,7 +6,7 @@ import pandas as pd
 from sklearn.metrics.pairwise import cosine_similarity
 from sklearn.preprocessing import MultiLabelBinarizer
 from fastapi.middleware.cors import CORSMiddleware
-import random
+from functools import cache
 from typing import List
 
 """
@@ -82,11 +82,11 @@ USERS = db["users"]
 
 def load_user_similarity_matrix():
     # ? Load user-item interaction data
-    cursor = USERS.find({}, {"_id": 1, "liked": 1})
+    cursor = USERS.find({}, {"_id": 1, "details.liked": 1})
     user_likes = {
-        str(doc["_id"]): [str(like) for like in doc.get("liked", [])] for doc in cursor
+        str(doc["_id"]): [str(like) for like in doc.get("details", {}).get("liked", [])]
+        for doc in cursor
     }
-
     # ? Convert to user-item matrix
     mlb = MultiLabelBinarizer()
     user_item_matrix = pd.DataFrame(
@@ -180,6 +180,7 @@ def recommend_memes(user_id: str, top_n: int = 13) -> List[str]:
     return final_recommendations[:top_n]
 
 
+@cache
 @app.get(
     "/memes",
     summary="Get list of memes",
@@ -191,6 +192,7 @@ async def list_memes():
     return memes_list
 
 
+@cache
 @app.get(
     "/users",
     summary="Get list of users",
@@ -202,6 +204,7 @@ async def list_user():
     return users_list
 
 
+@cache
 @app.get(
     "/recommendations/{user_id}",
     summary="Get top 10 meme recommendations for a user",
@@ -212,6 +215,7 @@ async def get_recommendations(user_id: str):
     return {"user_id": user_id.strip(), "recommendations": recommendations}
 
 
+@cache
 @app.get(
     "/similarity/{user_id1}/{user_id2}",
     summary="Get similarity between two users",
@@ -246,9 +250,10 @@ async def user_similarity(user_id1: str, user_id2: str):
     }
 
 
+@cache
 @app.get(
     "/similar/{user_id}",
-    summary="Get similarity between two users",
+    summary="Get similarity between users",
     description="Returns the similarity score between two users based on their liked memes.",
 )
 async def similar_users(user_id: str):
