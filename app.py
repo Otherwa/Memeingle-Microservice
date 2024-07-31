@@ -1,4 +1,5 @@
-from fastapi import FastAPI, HTTPException
+import random
+from fastapi import FastAPI, HTTPException, Depends
 from pymongo import MongoClient
 from bson import json_util
 import json
@@ -8,44 +9,7 @@ from sklearn.preprocessing import MultiLabelBinarizer
 from fastapi.middleware.cors import CORSMiddleware
 from functools import cache
 from typing import List
-
-"""
-Memeingle API
-
-Description:
-The Memeingle API provides endpoints to manage memes, users, and recommendations in the Memeingle application.
-
-Endpoints:
-- Memes:
-  - GET /memes: Get a list of memes from the MongoDB collection.
-
-- Users:
-  - GET /users: Get a list of users from the MongoDB collection.
-
-- Recommendations:
-  - GET /recommendations/{user_id}: Get the top 10 meme recommendations for the specified user based on collaborative filtering.
-    Parameters:
-      - user_id (str): The ID of the user for whom recommendations are requested.
-
-- Similarity:
-  - GET /similarity/{user_id1}/{user_id2}: Get the similarity score between two users based on their liked memes.
-    Parameters:
-      - user_id1 (str): The ID of the first user.
-      - user_id2 (str): The ID of the second user.
-
-Usage:
-1. List Memes: Retrieve a list of memes from the MongoDB collection by sending a GET request to /memes.
-2. List Users: Retrieve a list of users from the MongoDB collection by sending a GET request to /users.
-3. Get Recommendations: Get the top 10 meme recommendations for a specific user by sending a GET request to /recommendations/{user_id} where {user_id} is the ID of the user for whom recommendations are requested.
-4. Get Similarity: Get the similarity score between two users based on their liked memes by sending a GET request to /similarity/{user_id1}/{user_id2} where {user_id1} and {user_id2} are the IDs of the users to compare.
-
-Data Structures:
-- Meme: Each meme object consists of various attributes such as ID, title, author, URL, etc.
-- User: Each user object includes attributes like ID, email, password, liked memes, etc.
-
-Response Format:
-The API returns data in JSON format.
-"""
+from deta import Deta
 
 
 app = FastAPI(
@@ -69,6 +33,14 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
+# ? Initialize Deta with your project key
+DETA_PROJECT_KEY = "d0zuwufwggh_i5Y4sfgnP5YQg6imdd2zVqkqMRmUCCEC"
+deta = Deta(DETA_PROJECT_KEY)
+
+# Create a Base instance
+cache_base_likes = deta.Base("user_likes")
+cache_base_similar = deta.Base("user_similar")
+CACHE_EXPIRE_IN_SECONDS = 200  # 5 mins
 
 # ? Connect to MongoDB
 client = MongoClient(
@@ -80,11 +52,41 @@ MEMES = db["memes"]
 USERS = db["users"]
 
 
+# DETA
+async def get_cached_data(key, val):
+    if val == "likes":
+        data = cache_base_likes.get(key)
+        if data:
+            return data.get("value")
+    elif val == "similar":
+        data = cache_base_similar.get(key)
+        if data:
+            return data.get("value")
+    return None
+
+
+async def set_cache_data(
+    key,
+    data,
+    val,
+    expire=CACHE_EXPIRE_IN_SECONDS,
+):
+    if val == "likes":
+        cache_base_likes.put({"key": key, "value": data}, key, expire_in=expire)
+    elif val == "similar":
+        cache_base_similar.put({"key": key, "value": data}, key, expire_in=expire)
+
+
+# FAST-API
+
+
 def load_user_similarity_matrix():
     # ? Load user-item interaction data
     cursor = USERS.find({}, {"_id": 1, "details.liked": 1})
     user_likes = {
-        str(doc["_id"]): [str(like) for like in doc.get("details", {}).get("liked", [])]
+        str(doc["_id"]): [
+            str(like["meme"]) for like in doc.get("details", {}).get("liked", [])
+        ]
         for doc in cursor
     }
     # ? Convert to user-item matrix
@@ -116,7 +118,7 @@ def get_top_n_similar_users(user_id, n=5):
     return similar_users
 
 
-def recommend_memes(user_id: str, top_n: int = 13) -> List[str]:
+def recommend_memes(user_id: str, top_n: int = 20) -> List[str]:
     user_similarity_df, user_item_matrix = load_user_similarity_matrix()
 
     if user_id not in user_item_matrix.index:
@@ -134,50 +136,59 @@ def recommend_memes(user_id: str, top_n: int = 13) -> List[str]:
     )
     recommendations = [meme for meme in meme_scores.index if meme not in liked_memes]
 
+    print("Reccommed 1")
+    print(recommendations)
+
     # If not enough recommendations, widen the pool of similar users
     similar_user_count = 13
-    while len(recommendations) < 6 and similar_user_count < len(user_similarity_df):
+    while len(recommendations) < top_n and similar_user_count < len(user_similarity_df):
         similar_user_count += 5
         similar_users = get_top_n_similar_users(user_id, n=similar_user_count)
         meme_scores = (
             user_item_matrix.loc[similar_users].sum().sort_values(ascending=False)
         )
         new_recommendations = [
-            meme for meme in meme_scores.index if meme not in liked_memes
+            str(meme["_id"]) for meme in meme_scores.index if meme not in liked_memes
         ]
         recommendations = list(
             dict.fromkeys(recommendations + new_recommendations)
         )  # Remove duplicates and preserve order
 
-    # Ensure there are at least 6 recommendations
-    recommendations = recommendations[:6]
+    # Ensure there are at least 20 recommendations
+    recommendations = recommendations[:top_n]
+    print("Reccommed 2")
+    print(recommendations)
 
-    # Fill up with random memes from the collection to make a total of 13 memes
+    # Fill up with random memes from the collection to make a total of 20 memes
     remaining_count = top_n - len(recommendations)
-    random_memes = list(MEMES.aggregate([{"$sample": {"size": remaining_count}}]))
-    random_memes = [
-        str(meme["_id"])
-        for meme in random_memes
-        if str(meme["_id"]) not in liked_memes
-        and str(meme["_id"]) not in recommendations
-    ]
+    if remaining_count > 0:
+        random_memes = list(MEMES.aggregate([{"$sample": {"size": remaining_count}}]))
+        random_memes = [
+            str(meme["_id"])
+            for meme in random_memes
+            if str(meme["_id"]) not in liked_memes
+            and str(meme["_id"]) not in recommendations
+        ]
+        recommendations += random_memes
 
-    final_recommendations = recommendations + random_memes
+    print("Reccommed 3")
+    print(recommendations)
 
-    # Ensure there are at least 13 memes
-    if len(final_recommendations) < top_n:
+    # Ensure there are at least 20 memes
+    if len(recommendations) < top_n:
         additional_random_memes = list(
-            MEMES.aggregate([{"$sample": {"size": top_n - len(final_recommendations)}}])
+            MEMES.aggregate([{"$sample": {"size": top_n - len(recommendations)}}])
         )
         additional_random_memes = [
             str(meme["_id"])
             for meme in additional_random_memes
             if str(meme["_id"]) not in liked_memes
-            and str(meme["_id"]) not in final_recommendations
+            and str(meme["_id"]) not in recommendations
         ]
-        final_recommendations += additional_random_memes
+        recommendations += additional_random_memes
 
-    return final_recommendations[:top_n]
+    print(recommendations)
+    return recommendations[:top_n]
 
 
 @cache
@@ -188,7 +199,10 @@ def recommend_memes(user_id: str, top_n: int = 13) -> List[str]:
 )
 async def list_memes():
     memes = MEMES.find()
-    memes_list = [json.loads(json_util.dumps(meme)) for meme in memes]
+    memes_list = [
+        json.loads(json_util.dumps(meme))
+        for meme in memes[: random.randrange(20, 50, 3)]
+    ]
     return memes_list
 
 
@@ -208,46 +222,19 @@ async def list_user():
 @app.get(
     "/recommendations/{user_id}",
     summary="Get top 10 meme recommendations for a user",
-    description="Returns the top 10 meme recommendations for the specified user based on collaborative filtering.",
+    description="Returns the top 34 meme recommendations for the specified user based on collaborative filtering.",
 )
 async def get_recommendations(user_id: str):
-    recommendations = recommend_memes(user_id.strip(), top_n=13)
-    return {"user_id": user_id.strip(), "recommendations": recommendations}
+    cache_key = f"recommendations:{user_id}"
+    cached_data = await get_cached_data(cache_key, "likes")
+    if cached_data:
+        return cached_data
 
+    recommendations = recommend_memes(user_id.strip(), top_n=34)
+    response = {"user_id": user_id.strip(), "recommendations": recommendations}
 
-@cache
-@app.get(
-    "/similarity/{user_id1}/{user_id2}",
-    summary="Get similarity between two users",
-    description="Returns the similarity score between two users based on their liked memes.",
-)
-async def user_similarity(user_id1: str, user_id2: str):
-    # ? Calculate cosine similarities between users
-    user_item_matrix = load_user_similarity_matrix()[1]
-
-    user_similarity = cosine_similarity(user_item_matrix)
-    user_similarity_df = pd.DataFrame(
-        user_similarity, index=user_item_matrix.index, columns=user_item_matrix.index
-    )
-
-    print(user_similarity_df)
-
-    str_user_id1 = str(user_id1).strip()
-    str_user_id2 = str(user_id2).strip()
-
-    if (
-        str_user_id1 not in user_similarity_df.index
-        or str_user_id2 not in user_similarity_df.index
-    ):
-        raise HTTPException(status_code=404, detail="User not found")
-
-    similarity_score = user_similarity_df.loc[str_user_id1, str_user_id2]
-
-    return {
-        "user_id1": str_user_id1,
-        "user_id2": str_user_id2,
-        "similarity_score": similarity_score,
-    }
+    await set_cache_data(cache_key, response, "likes")
+    return response
 
 
 @cache
@@ -269,24 +256,41 @@ async def similar_users(user_id: str):
 
     str_user_id = str(user_id).strip()
 
+    # Check cache first
+    cache_key = f"similar:{user_id}"
+    cached_data = await get_cached_data(cache_key, "similar")
+    if cached_data:
+        print("Cache Hit")
+        return cached_data
+
+    # Calculate cosine similarities between users
+    user_similarity = cosine_similarity(user_item_matrix)
+    user_similarity_df = pd.DataFrame(
+        user_similarity, index=user_item_matrix.index, columns=user_item_matrix.index
+    )
+
+    print(user_similarity_df)
+
     if str_user_id not in user_similarity_df.index:
         raise HTTPException(status_code=404, detail="User not found")
 
     similarity_score_users = user_similarity_df.loc[str_user_id, :]
 
-    # ? Sort the similarity scores in descending order and get the top 5 users
+    print(user_similarity_df.loc[str_user_id, :])
 
-    top_5_similar_users = similarity_score_users.sort_values(ascending=False).head(
-        6
-    )  # ? head(6) to exclude the user itself
+    # Sort the similarity scores in descending order and get the top 5 users
+    top_5_similar_users = similarity_score_users.sort_values(ascending=False).head(6)
 
-    # ? Exclude the user itself from the top similar users
+    # Exclude the user itself from the top similar users
     top_5_similar_users = top_5_similar_users[
         top_5_similar_users.index != str_user_id
     ].head(5)
 
-    # ? Return the top 5 similar users and their similarity scores
+    # Prepare result
     result = {"user": str_user_id, "data": top_5_similar_users.to_dict()}
+    print(result)
+    # Cache the result
+    await set_cache_data(cache_key, result, "similar", CACHE_EXPIRE_IN_SECONDS)
 
     return result
 
