@@ -228,6 +228,7 @@ async def get_recommendations(user_id: str):
     cache_key = f"recommendations:{user_id}"
     cached_data = await get_cached_data(cache_key, "likes")
     if cached_data:
+        print(cached_data)
         return cached_data
 
     recommendations = recommend_memes(user_id.strip(), top_n=34)
