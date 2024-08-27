@@ -1,11 +1,21 @@
-import random
 from fastapi import FastAPI, HTTPException, Depends
 from pymongo import MongoClient
+
 from bson import json_util
+from bson.objectid import ObjectId
+
+import random
+import math
+import numpy as np
 import json
 import pandas as pd
+
 from sklearn.metrics.pairwise import cosine_similarity
 from sklearn.preprocessing import MultiLabelBinarizer
+from sklearn.impute import SimpleImputer
+from sklearn.preprocessing import StandardScaler
+from sklearn.cluster import KMeans
+from collections import Counter
 from fastapi.middleware.cors import CORSMiddleware
 from functools import cache
 from typing import List
@@ -40,6 +50,7 @@ deta = Deta(DETA_PROJECT_KEY)
 # Create a Base instance
 cache_base_likes = deta.Base("user_likes")
 cache_base_similar = deta.Base("user_similar")
+cache_base_personality = deta.Base("user_personality")
 CACHE_EXPIRE_IN_SECONDS = 200  # 5 mins
 
 # ? Connect to MongoDB
@@ -62,6 +73,10 @@ async def get_cached_data(key, val):
         data = cache_base_similar.get(key)
         if data:
             return data.get("value")
+    elif val == "personality":
+        data = cache_base_personality.get(key)
+        if data:
+            return data.get("value")
     return None
 
 
@@ -75,6 +90,8 @@ async def set_cache_data(
         cache_base_likes.put({"key": key, "value": data}, key, expire_in=expire)
     elif val == "similar":
         cache_base_similar.put({"key": key, "value": data}, key, expire_in=expire)
+    elif val == "personality":
+        cache_base_personality.put({"key": key, "value": data}, key, expire_in=expire)
 
 
 # FAST-API
@@ -294,6 +311,145 @@ async def similar_users(user_id: str):
     await set_cache_data(cache_key, result, "similar", CACHE_EXPIRE_IN_SECONDS)
 
     return result
+
+
+# Add the personality prediction route
+@cache
+@app.get(
+    "/predict-personality/{user_id}",
+    summary="Predict the personality of a user",
+    description="Returns the predicted personality type for the specified user.",
+)
+async def predict_personality(user_id: str):
+    data = await get_cached_data(user_id, "personality")
+
+    if data:
+        return data
+
+    def extract_features(user_data, meme_data, subreddit_list):
+        sentiment_scores = []
+        upvotes = []
+        subreddits = []
+
+        for liked_meme in user_data["details"]["liked"]:
+            meme_id = str(liked_meme["meme"])
+            meme = meme_data.get(meme_id)
+
+            if (
+                meme
+                and "Sentiment" in meme
+                and "UpVotes" in meme
+                and "Subreddit" in meme
+            ):
+                if not math.isnan(meme["Sentiment"]):
+                    sentiment_scores.append(meme["Sentiment"])
+                if not math.isnan(meme["UpVotes"]):
+                    upvotes.append(meme["UpVotes"])
+                subreddits.append(meme["Subreddit"])
+
+        # Calculate averages and variance, with NaN checks
+        avg_sentiment = np.mean(sentiment_scores) if sentiment_scores else 0
+        avg_upvotes = np.mean(upvotes) if upvotes else 0
+        sentiment_variance = np.var(sentiment_scores) if sentiment_scores else 0
+        most_common_subreddit = (
+            Counter(subreddits).most_common(1)[0][0] if subreddits else None
+        )
+
+        # Create the subreddit vector
+        subreddit_vector = [
+            1 if most_common_subreddit == subreddit else 0
+            for subreddit in subreddit_list
+        ]
+
+        # Create the feature vector
+        feature_vector = [
+            avg_sentiment,
+            avg_upvotes,
+            *subreddit_vector,
+            len(sentiment_scores),  # Number of liked memes
+            sentiment_variance,
+        ]
+
+        # Replace any remaining NaN with 0 (just in case)
+        feature_vector = [
+            0 if math.isnan(feature) else feature for feature in feature_vector
+        ]
+
+        return feature_vector
+
+    # Fetch all users data
+    user_data_list = list(USERS.find({}))
+
+    # Fetch all memes data and convert it to a dictionary with _id as keys
+    meme_data_dict = {str(meme["_id"]): meme for meme in MEMES.find({})}
+
+    # Get the list of unique subreddits
+    subreddit_list = MEMES.distinct("Subreddit")
+
+    # Find the user data based on user_id
+    user_id = ObjectId(user_id)
+    user_data = USERS.find_one({"_id": user_id})
+
+    if not user_data:
+        raise HTTPException(status_code=404, detail="User not found")
+
+    # Extract features for the given user
+    X_user = extract_features(user_data, meme_data_dict, subreddit_list)
+
+    # Extract features for all users
+    X = [
+        extract_features(user, meme_data_dict, subreddit_list)
+        for user in user_data_list
+    ]
+
+    # Step 1: Handle missing values
+    imputer = SimpleImputer(strategy="mean")
+    X_imputed = imputer.fit_transform(X)
+
+    # Step 2: Normalize Features
+    scaler = StandardScaler()
+    X_scaled = scaler.fit_transform(X_imputed)
+
+    # Step 3: Perform K-Means Clustering
+    num_clusters = 5  # Adjust this based on the number of personality clusters you want to identify
+    kmeans = KMeans(n_clusters=num_clusters, random_state=42)
+    kmeans.fit(X_scaled)
+
+    # Predict the cluster for the given user
+    X_user_imputed = imputer.transform([X_user])
+    X_user_scaled = scaler.transform(X_user_imputed)
+    user_cluster = kmeans.predict(X_user_scaled)[0]
+
+    # Define descriptive labels for clusters based on characteristics
+    cluster_descriptions = [
+        "Highly Positive and Engaged",
+        "Moderate Sentiment and Engagement",
+        "Low Sentiment, High Engagement",
+        "Mixed Sentiment, Niche Interests",
+        "High Sentiment, Low Engagement",
+    ]
+
+    # Use the cluster description as the personality type
+    predicted_personality = cluster_descriptions[user_cluster]
+
+    # Aggregate the distribution of personality types for graphing
+    all_user_clusters = kmeans.labels_
+    cluster_distribution = Counter(all_user_clusters)
+    cluster_distribution_dict = {
+        cluster_descriptions[k]: v for k, v in cluster_distribution.items()
+    }
+
+    # Prepare the response
+    user_id = str(user_id)
+    response = {
+        "user_id": user_id,
+        "predicted_personality": predicted_personality,
+        "cluster_distribution": cluster_distribution_dict,
+    }
+
+    await set_cache_data(user_id, response, "personality", 86400)
+
+    return response
 
 
 if __name__ == "__main__":
