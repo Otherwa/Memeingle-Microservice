@@ -11,6 +11,7 @@ import json
 import pandas as pd
 
 from sklearn.metrics.pairwise import cosine_similarity
+from sklearn.model_selection import train_test_split
 from sklearn.preprocessing import MultiLabelBinarizer
 from sklearn.impute import SimpleImputer
 from sklearn.preprocessing import StandardScaler
@@ -20,6 +21,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from functools import cache
 from typing import List
 from deta import Deta
+from sklearn.tree import DecisionTreeClassifier
 
 
 app = FastAPI(
@@ -347,7 +349,7 @@ async def predict_personality(user_id: str):
                     upvotes.append(meme["UpVotes"])
                 subreddits.append(meme["Subreddit"])
 
-        # Calculate averages and variance, with NaN checks
+        # Calculate averages and variance
         avg_sentiment = np.mean(sentiment_scores) if sentiment_scores else 0
         avg_upvotes = np.mean(upvotes) if upvotes else 0
         sentiment_variance = np.var(sentiment_scores) if sentiment_scores else 0
@@ -355,99 +357,81 @@ async def predict_personality(user_id: str):
             Counter(subreddits).most_common(1)[0][0] if subreddits else None
         )
 
-        # Create the subreddit vector
+        # Create subreddit vector
         subreddit_vector = [
             1 if most_common_subreddit == subreddit else 0
             for subreddit in subreddit_list
         ]
 
-        # Create the feature vector
+        # Create feature vector
         feature_vector = [
             avg_sentiment,
             avg_upvotes,
             *subreddit_vector,
-            len(sentiment_scores),  # Number of liked memes
+            len(sentiment_scores),
             sentiment_variance,
         ]
 
-        # Replace any remaining NaN with 0 (just in case)
-        feature_vector = [
-            0 if math.isnan(feature) else feature for feature in feature_vector
-        ]
+        return [0 if math.isnan(feature) else feature for feature in feature_vector]
 
-        return feature_vector
-
-    # Fetch all users data
+    # Fetch all users and memes data
     user_data_list = list(USERS.find({}))
-
-    # Fetch all memes data and convert it to a dictionary with _id as keys
     meme_data_dict = {str(meme["_id"]): meme for meme in MEMES.find({})}
-
-    # Get the list of unique subreddits
     subreddit_list = MEMES.distinct("Subreddit")
 
-    # Find the user data based on user_id
-    user_id = ObjectId(user_id)
-    user_data = USERS.find_one({"_id": user_id})
+    # Find the target user data
+    user_data = USERS.find_one({"_id": ObjectId(user_id)})
 
     if not user_data:
         raise HTTPException(status_code=404, detail="User not found")
 
-    # Extract features for the given user
+    # Extract features for the target user and all users
     X_user = extract_features(user_data, meme_data_dict, subreddit_list)
-
-    # Extract features for all users
     X = [
         extract_features(user, meme_data_dict, subreddit_list)
         for user in user_data_list
+    ]
+
+    # Define the personality labels for each user (example labels)
+    y = [
+        random.choice(
+            [
+                "Highly Positive and Engaged",
+                "Moderate Sentiment and Engagement",
+                "Low Sentiment, High Engagement",
+                "Mixed Sentiment, Niche Interests",
+                "High Sentiment, Low Engagement",
+            ]
+        )
+        for _ in range(len(X))
     ]
 
     # Step 1: Handle missing values
     imputer = SimpleImputer(strategy="mean")
     X_imputed = imputer.fit_transform(X)
 
-    # Step 2: Normalize Features
-    scaler = StandardScaler()
-    X_scaled = scaler.fit_transform(X_imputed)
+    # Step 2: Train a Decision Tree Classifier
+    clf = DecisionTreeClassifier(random_state=42)
+    clf.fit(X_imputed, y)
 
-    # Step 3: Perform K-Means Clustering
-    num_clusters = 5  # Adjust this based on the number of personality clusters you want to identify
-    kmeans = KMeans(n_clusters=num_clusters, random_state=42)
-    kmeans.fit(X_scaled)
-
-    # Predict the cluster for the given user
+    # Step 3: Predict personality for the target user
     X_user_imputed = imputer.transform([X_user])
-    X_user_scaled = scaler.transform(X_user_imputed)
-    user_cluster = kmeans.predict(X_user_scaled)[0]
+    predicted_personality = clf.predict(X_user_imputed)[0]
 
-    # Define descriptive labels for clusters based on characteristics
-    cluster_descriptions = [
-        "Highly Positive and Engaged",
-        "Moderate Sentiment and Engagement",
-        "Low Sentiment, High Engagement",
-        "Mixed Sentiment, Niche Interests",
-        "High Sentiment, Low Engagement",
-    ]
-
-    # Use the cluster description as the personality type
-    predicted_personality = cluster_descriptions[user_cluster]
-
-    # Aggregate the distribution of personality types for graphing
-    all_user_clusters = kmeans.labels_
-    cluster_distribution = Counter(all_user_clusters)
-    cluster_distribution_dict = {
-        cluster_descriptions[k]: v for k, v in cluster_distribution.items()
-    }
+    # Get personality distribution across all users
+    all_user_predictions = clf.predict(X_imputed)
+    cluster_distribution = Counter(all_user_predictions)
 
     # Prepare the response
     user_id = str(user_id)
     response = {
         "user_id": user_id,
         "predicted_personality": predicted_personality,
-        "cluster_distribution": cluster_distribution_dict,
+        "cluster_distribution": dict(cluster_distribution),
     }
 
-    await set_cache_data(user_id, response, "personality", 86400)
+    # Cache the response for future use
+    await set_cache_data(user_id, response, "personality", 10800)
 
     return response
 
