@@ -45,17 +45,17 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-# ? Initialize Deta with your project key
+# * ? Initialize Deta with your project key
 DETA_PROJECT_KEY = "d0zuwufwggh_i5Y4sfgnP5YQg6imdd2zVqkqMRmUCCEC"
 deta = Deta(DETA_PROJECT_KEY)
 
-# Create a Base instance
+# * Create a Base instance
 cache_base_likes = deta.Base("user_likes")
 cache_base_similar = deta.Base("user_similar")
 cache_base_personality = deta.Base("user_personality")
-CACHE_EXPIRE_IN_SECONDS = 200  # 5 mins
+CACHE_EXPIRE_IN_SECONDS = 200  # * 5 mins
 
-# ? Connect to MongoDB
+# * ? Connect to MongoDB
 client = MongoClient(
     "mongodb+srv://atharvdesai:ahrAA7kOTdZfyur9@cluster0.smf3kdb.mongodb.net/Memeingle?retryWrites=true&w=majority&appName=Cluster0"
 )
@@ -65,7 +65,7 @@ MEMES = db["memes"]
 USERS = db["users"]
 
 
-# DETA
+# * DETA
 async def get_cached_data(key, val):
     if val == "likes":
         data = cache_base_likes.get(key)
@@ -96,11 +96,11 @@ async def set_cache_data(
         cache_base_personality.put({"key": key, "value": data}, key, expire_in=expire)
 
 
-# FAST-API
+# * FAST-API
 
 
 def load_user_similarity_matrix():
-    # ? Load user-item interaction data
+    # * ? Load user-item interaction data
     cursor = USERS.find({}, {"_id": 1, "details.liked": 1})
     user_likes = {
         str(doc["_id"]): [
@@ -108,7 +108,7 @@ def load_user_similarity_matrix():
         ]
         for doc in cursor
     }
-    # ? Convert to user-item matrix
+    # * ? Convert to user-item matrix
     mlb = MultiLabelBinarizer()
     user_item_matrix = pd.DataFrame(
         mlb.fit_transform(user_likes.values()),
@@ -116,7 +116,7 @@ def load_user_similarity_matrix():
         columns=mlb.classes_,
     )
 
-    # ? Calculate cosine similarities between users
+    # * ? Calculate cosine similarities between users
     user_similarity = cosine_similarity(user_item_matrix)
     user_similarity_df = pd.DataFrame(
         user_similarity, index=user_item_matrix.index, columns=user_item_matrix.index
@@ -143,13 +143,13 @@ def recommend_memes(user_id: str, top_n: int = 20) -> List[str]:
     if user_id not in user_item_matrix.index:
         raise HTTPException(status_code=404, detail="User not found")
 
-    # Find similar users
+    # * Find similar users
     similar_users = get_top_n_similar_users(user_id)
 
-    # Aggregate memes liked by similar users
+    # * Aggregate memes liked by similar users
     meme_scores = user_item_matrix.loc[similar_users].sum().sort_values(ascending=False)
 
-    # Filter out memes the user has already liked
+    # * Filter out memes the user has already liked
     liked_memes = set(
         user_item_matrix.loc[user_id][user_item_matrix.loc[user_id] == 1].index
     )
@@ -158,7 +158,7 @@ def recommend_memes(user_id: str, top_n: int = 20) -> List[str]:
     print("Reccommed 1")
     print(recommendations)
 
-    # If not enough recommendations, widen the pool of similar users
+    # * If not enough recommendations, widen the pool of similar users
     similar_user_count = 13
     while len(recommendations) < top_n and similar_user_count < len(user_similarity_df):
         similar_user_count += 5
@@ -171,14 +171,14 @@ def recommend_memes(user_id: str, top_n: int = 20) -> List[str]:
         ]
         recommendations = list(
             dict.fromkeys(recommendations + new_recommendations)
-        )  # Remove duplicates and preserve order
+        )  # * Remove duplicates and preserve order
 
-    # Ensure there are at least 20 recommendations
+    # * Ensure there are at least 20 recommendations
     recommendations = recommendations[:top_n]
     print("Reccommed 2")
     print(recommendations)
 
-    # Fill up with random memes from the collection to make a total of 20 memes
+    # * Fill up with random memes from the collection to make a total of 20 memes
     remaining_count = top_n - len(recommendations)
     if remaining_count > 0:
         random_memes = list(MEMES.aggregate([{"$sample": {"size": remaining_count}}]))
@@ -193,7 +193,7 @@ def recommend_memes(user_id: str, top_n: int = 20) -> List[str]:
     print("Reccommed 3")
     print(recommendations)
 
-    # Ensure there are at least 20 memes
+    # * Ensure there are at least 20 memes
     if len(recommendations) < top_n:
         additional_random_memes = list(
             MEMES.aggregate([{"$sample": {"size": top_n - len(recommendations)}}])
@@ -264,7 +264,7 @@ async def get_recommendations(user_id: str):
     description="Returns the similarity score between two users based on their liked memes.",
 )
 async def similar_users(user_id: str):
-    # ? Calculate cosine similarities between users
+    # * ? Calculate cosine similarities between users
     user_item_matrix = load_user_similarity_matrix()[1]
 
     user_similarity = cosine_similarity(user_item_matrix)
@@ -276,14 +276,14 @@ async def similar_users(user_id: str):
 
     str_user_id = str(user_id).strip()
 
-    # Check cache first
+    # * Check cache first
     cache_key = f"similar:{user_id}"
     cached_data = await get_cached_data(cache_key, "similar")
     if cached_data:
         print("Cache Hit")
         return cached_data
 
-    # Calculate cosine similarities between users
+    # * Calculate cosine similarities between users
     user_similarity = cosine_similarity(user_item_matrix)
     user_similarity_df = pd.DataFrame(
         user_similarity, index=user_item_matrix.index, columns=user_item_matrix.index
@@ -298,24 +298,24 @@ async def similar_users(user_id: str):
 
     print(user_similarity_df.loc[str_user_id, :])
 
-    # Sort the similarity scores in descending order and get the top 5 users
+    # * Sort the similarity scores in descending order and get the top 5 users
     top_5_similar_users = similarity_score_users.sort_values(ascending=False).head(6)
 
-    # Exclude the user itself from the top similar users
+    # * Exclude the user itself from the top similar users
     top_5_similar_users = top_5_similar_users[
         top_5_similar_users.index != str_user_id
     ].head(5)
 
-    # Prepare result
+    # * Prepare result
     result = {"user": str_user_id, "data": top_5_similar_users.to_dict()}
     print(result)
-    # Cache the result
+    # * Cache the result
     await set_cache_data(cache_key, result, "similar", CACHE_EXPIRE_IN_SECONDS)
 
     return result
 
 
-# Add the personality prediction route
+# * Add the personality prediction route
 @cache
 @app.get(
     "/predict-personality/{user_id}",
@@ -349,7 +349,7 @@ async def predict_personality(user_id: str):
                     upvotes.append(meme["UpVotes"])
                 subreddits.append(meme["Subreddit"])
 
-        # Calculate averages and variance
+        # * Calculate averages and variance
         avg_sentiment = np.mean(sentiment_scores) if sentiment_scores else 0
         avg_upvotes = np.mean(upvotes) if upvotes else 0
         sentiment_variance = np.var(sentiment_scores) if sentiment_scores else 0
@@ -357,13 +357,13 @@ async def predict_personality(user_id: str):
             Counter(subreddits).most_common(1)[0][0] if subreddits else None
         )
 
-        # Create subreddit vector
+        # * Create subreddit vector
         subreddit_vector = [
             1 if most_common_subreddit == subreddit else 0
             for subreddit in subreddit_list
         ]
 
-        # Create feature vector
+        # * Create feature vector
         feature_vector = [
             avg_sentiment,
             avg_upvotes,
@@ -374,25 +374,25 @@ async def predict_personality(user_id: str):
 
         return [0 if math.isnan(feature) else feature for feature in feature_vector]
 
-    # Fetch all users and memes data
+    # * Fetch all users and memes data
     user_data_list = list(USERS.find({}))
     meme_data_dict = {str(meme["_id"]): meme for meme in MEMES.find({})}
     subreddit_list = MEMES.distinct("Subreddit")
 
-    # Find the target user data
+    # * Find the target user data
     user_data = USERS.find_one({"_id": ObjectId(user_id)})
 
     if not user_data:
         raise HTTPException(status_code=404, detail="User not found")
 
-    # Extract features for the target user and all users
+    # * Extract features for the target user and all users
     X_user = extract_features(user_data, meme_data_dict, subreddit_list)
     X = [
         extract_features(user, meme_data_dict, subreddit_list)
         for user in user_data_list
     ]
 
-    # Define the personality labels for each user (example labels)
+    # * Define the personality labels for each user (example labels)
     y = [
         random.choice(
             [
@@ -406,32 +406,32 @@ async def predict_personality(user_id: str):
         for _ in range(len(X))
     ]
 
-    # Step 1: Handle missing values
+    # * Step 1: Handle missing values
     imputer = SimpleImputer(strategy="mean")
     X_imputed = imputer.fit_transform(X)
 
-    # Step 2: Train a Decision Tree Classifier
+    # * Step 2: Train a Decision Tree Classifier
     clf = DecisionTreeClassifier(random_state=42)
     clf.fit(X_imputed, y)
 
-    # Step 3: Predict personality for the target user
+    # * Step 3: Predict personality for the target user
     X_user_imputed = imputer.transform([X_user])
     predicted_personality = clf.predict(X_user_imputed)[0]
 
-    # Get personality distribution across all users
+    # * Get personality distribution across all users
     all_user_predictions = clf.predict(X_imputed)
     cluster_distribution = Counter(all_user_predictions)
 
-    # Calculate total predictions
+    # * Calculate total predictions
     total_predictions = sum(cluster_distribution.values())
 
-    # Convert counts to percentages
+    # * Convert counts to percentages
     cluster_distribution_percent = {
         cluster: (count / total_predictions) * 100
         for cluster, count in cluster_distribution.items()
     }
 
-    # Prepare the response
+    # * Prepare the response
     user_id = str(user_id)
     response = {
         "user_id": user_id,
@@ -439,7 +439,7 @@ async def predict_personality(user_id: str):
         "cluster_distribution": cluster_distribution_percent,
     }
 
-    # Cache the response for future use
+    # * Cache the response for future use
     await set_cache_data(user_id, response, "personality", 10800)
 
     return response
