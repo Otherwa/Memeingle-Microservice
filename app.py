@@ -422,12 +422,21 @@ async def predict_personality(user_id: str):
     all_user_predictions = clf.predict(X_imputed)
     cluster_distribution = Counter(all_user_predictions)
 
+    # Calculate total predictions
+    total_predictions = sum(cluster_distribution.values())
+
+    # Convert counts to percentages
+    cluster_distribution_percent = {
+        cluster: (count / total_predictions) * 100
+        for cluster, count in cluster_distribution.items()
+    }
+
     # Prepare the response
     user_id = str(user_id)
     response = {
         "user_id": user_id,
         "predicted_personality": predicted_personality,
-        "cluster_distribution": dict(cluster_distribution),
+        "cluster_distribution": cluster_distribution_percent,
     }
 
     # Cache the response for future use
