@@ -11,11 +11,10 @@ import json
 import pandas as pd
 
 from sklearn.metrics.pairwise import cosine_similarity
-from sklearn.model_selection import train_test_split
 from sklearn.preprocessing import MultiLabelBinarizer
 from sklearn.impute import SimpleImputer
-from sklearn.preprocessing import StandardScaler
 from sklearn.cluster import KMeans
+from sklearn.metrics import silhouette_score
 from collections import Counter
 from fastapi.middleware.cors import CORSMiddleware
 from functools import cache
@@ -323,12 +322,13 @@ async def similar_users(user_id: str):
     description="Returns the predicted personality type for the specified user.",
 )
 async def predict_personality(user_id: str):
-    data = await get_cached_data(user_id, "personality")
-
-    if data:
-        return data
+    # Check if the personality data is cached
+    cached_data = await get_cached_data(user_id, "personality")
+    if cached_data:
+        return cached_data
 
     def extract_features(user_data, meme_data, subreddit_list):
+        """Extract relevant features from user and meme data."""
         sentiment_scores = []
         upvotes = []
         subreddits = []
@@ -349,7 +349,7 @@ async def predict_personality(user_id: str):
                     upvotes.append(meme["UpVotes"])
                 subreddits.append(meme["Subreddit"])
 
-        # * Calculate averages and variance
+        # Calculate averages and variance
         avg_sentiment = np.mean(sentiment_scores) if sentiment_scores else 0
         avg_upvotes = np.mean(upvotes) if upvotes else 0
         sentiment_variance = np.var(sentiment_scores) if sentiment_scores else 0
@@ -357,13 +357,13 @@ async def predict_personality(user_id: str):
             Counter(subreddits).most_common(1)[0][0] if subreddits else None
         )
 
-        # * Create subreddit vector
+        # Create subreddit vector
         subreddit_vector = [
             1 if most_common_subreddit == subreddit else 0
             for subreddit in subreddit_list
         ]
 
-        # * Create feature vector
+        # Create feature vector
         feature_vector = [
             avg_sentiment,
             avg_upvotes,
@@ -374,72 +374,107 @@ async def predict_personality(user_id: str):
 
         return [0 if math.isnan(feature) else feature for feature in feature_vector]
 
-    # * Fetch all users and memes data
+    # Fetch all users and memes data
     user_data_list = list(USERS.find({}))
     meme_data_dict = {str(meme["_id"]): meme for meme in MEMES.find({})}
     subreddit_list = MEMES.distinct("Subreddit")
 
-    # * Find the target user data
+    # Find the target user data
     user_data = USERS.find_one({"_id": ObjectId(user_id)})
-
     if not user_data:
         raise HTTPException(status_code=404, detail="User not found")
 
-    # * Extract features for the target user and all users
+    # Extract features for the target user and all users
     X_user = extract_features(user_data, meme_data_dict, subreddit_list)
     X = [
         extract_features(user, meme_data_dict, subreddit_list)
         for user in user_data_list
     ]
 
-    # * Define the personality labels for each user (example labels)
-    y = [
-        random.choice(
-            [
-                "Highly Positive and Engaged",
-                "Moderate Sentiment and Engagement",
-                "Low Sentiment, High Engagement",
-                "Mixed Sentiment, Niche Interests",
-                "High Sentiment, Low Engagement",
-            ]
-        )
-        for _ in range(len(X))
-    ]
-
-    # * Step 1: Handle missing values
+    # Step 1: Handle missing values
     imputer = SimpleImputer(strategy="mean")
     X_imputed = imputer.fit_transform(X)
 
-    # * Step 2: Train a Decision Tree Classifier
+    # Step 2: Determine the optimal number of clusters using the Elbow Method
+    distortions = []
+    silhouette_scores = []
+    max_clusters = min(10, len(user_data_list) // 2)  # Limit max clusters
+
+    for k in range(2, max_clusters + 1):
+        kmeans = KMeans(n_clusters=k, random_state=42)
+        kmeans.fit(X_imputed)
+        distortions.append(kmeans.inertia_)
+        silhouette_scores.append(silhouette_score(X_imputed, kmeans.labels_))
+
+    # Choose the optimal number of clusters based on silhouette scores
+    optimal_clusters = np.argmax(silhouette_scores) + 2  # +2 because k starts at 2
+
+    # Step 3: Apply KMeans with the optimal number of clusters
+    kmeans = KMeans(n_clusters=optimal_clusters, random_state=42)
+    cluster_labels = kmeans.fit_predict(X_imputed)
+
+    # Use cluster labels as target variable for training the classifier
+    y = [f"Cluster {label}" for label in cluster_labels]
+
+    # Step 4: Train a Decision Tree Classifier using cluster labels
     clf = DecisionTreeClassifier(random_state=42)
     clf.fit(X_imputed, y)
 
-    # * Step 3: Predict personality for the target user
+    # Step 5: Predict personality for the target user
     X_user_imputed = imputer.transform([X_user])
-    predicted_personality = clf.predict(X_user_imputed)[0]
+    predicted_cluster_label = clf.predict(X_user_imputed)[0]
 
-    # * Get personality distribution across all users
+    # Map cluster labels to personality descriptions
+    personality_mapping = {
+        "Cluster 0": "Highly Positive and Engaged",
+        "Cluster 1": "Moderate Sentiment and Engagement",
+        "Cluster 2": "Low Sentiment, High Engagement",
+        "Cluster 3": "Mixed Sentiment, Niche Interests",
+        "Cluster 4": "High Sentiment, Low Engagement",
+    }
+
+    # Get the personality description for the predicted cluster
+    predicted_personality_description = personality_mapping.get(
+        predicted_cluster_label, "Unknown Personality"
+    )
+
+    # Get personality distribution across all users
     all_user_predictions = clf.predict(X_imputed)
     cluster_distribution = Counter(all_user_predictions)
 
-    # * Calculate total predictions
+    # Calculate total predictions
     total_predictions = sum(cluster_distribution.values())
 
-    # * Convert counts to percentages
+    # Convert counts to percentages
     cluster_distribution_percent = {
         cluster: (count / total_predictions) * 100
         for cluster, count in cluster_distribution.items()
     }
 
-    # * Prepare the response
-    user_id = str(user_id)
+    # Prepare the response
     response = {
-        "user_id": user_id,
-        "predicted_personality": predicted_personality,
-        "cluster_distribution": cluster_distribution_percent,
+        "user_id": str(user_id),
+        "predicted_personality": predicted_personality_description,
+        "cluster_distribution": {
+            "Highly Positive and Engaged": cluster_distribution_percent.get(
+                "Cluster 0", 0
+            ),
+            "Moderate Sentiment and Engagement": cluster_distribution_percent.get(
+                "Cluster 1", 0
+            ),
+            "Low Sentiment, High Engagement": cluster_distribution_percent.get(
+                "Cluster 2", 0
+            ),
+            "Mixed Sentiment, Niche Interests": cluster_distribution_percent.get(
+                "Cluster 3", 0
+            ),
+            "High Sentiment, Low Engagement": cluster_distribution_percent.get(
+                "Cluster 4", 0
+            ),
+        },
     }
 
-    # * Cache the response for future use
+    # Cache the response for future use
     await set_cache_data(user_id, response, "personality", 10800)
 
     return response
