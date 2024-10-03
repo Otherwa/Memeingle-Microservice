@@ -13,15 +13,26 @@ from collections import Counter
 from deta import Deta
 import math
 
-app = FastAPI()
+app = FastAPI(
+    title="Memeingle API",
+    description="This API provides endpoints to manage memes, users, and recommendations in the Memeingle application.",
+    version="1.0.0",
+    openapi_url="/api/v1/openapi.json",
+    docs_url="/api/v1/docs",
+    tags=[
+        {"name": "Memes", "description": "Endpoints related to memes"},
+        {"name": "Users", "description": "Endpoints related to users"},
+        {"name": "Recommendations", "description": "Endpoints for recommendations"},
+    ],
+)
 
 # Initialize Deta with your project key
-DETA_PROJECT_KEY = "your_deta_project_key"
+DETA_PROJECT_KEY = "d0zuwufwggh_i5Y4sfgnP5YQg6imdd2zVqkqMRmUCCEC"
 deta = Deta(DETA_PROJECT_KEY)
 cache_base_personality = deta.Base("user_personality")
 
 # Connect to MongoDB
-client = MongoClient("your_mongodb_connection_string")
+client = MongoClient("mongodb+srv://atharvdesai:ahrAA7kOTdZfyur9@cluster0.smf3kdb.mongodb.net/Memeingle?retryWrites=true&w=majority&appName=Cluster0")
 db = client["Memeingle"]
 USERS = db["users"]
 MEMES = db["memes"]
