@@ -13,8 +13,6 @@ import pandas as pd
 from sklearn.metrics.pairwise import cosine_similarity
 from sklearn.preprocessing import MultiLabelBinarizer
 from sklearn.impute import SimpleImputer
-from sklearn.cluster import KMeans
-from sklearn.metrics import silhouette_score
 from collections import Counter
 from sklearn.ensemble import RandomForestClassifier
 from fastapi.middleware.cors import CORSMiddleware
@@ -344,8 +342,7 @@ def extract_features(user_data, meme_data, subreddit_list):
 
     # Create subreddit vector
     subreddit_vector = [
-        1 if most_common_subreddit == subreddit else 0
-        for subreddit in subreddit_list
+        1 if most_common_subreddit == subreddit else 0 for subreddit in subreddit_list
     ]
 
     # Create feature vector
@@ -359,13 +356,31 @@ def extract_features(user_data, meme_data, subreddit_list):
 
     return [0 if math.isnan(feature) else feature for feature in feature_vector]
 
+
 def assign_personality(avg_sentiment, avg_upvotes, liked_memes):
     """Assign personality label based on average sentiment, upvotes, and specific meme data."""
-    
+
     # Initialize counters for different sentiment ranges
-    positive_count = sum(1 for meme in liked_memes if meme.get("Sentiment", 0) > 0.5)
-    negative_count = sum(1 for meme in liked_memes if meme.get("Sentiment", 0) < 0.5)
-    neutral_count = len(liked_memes) - positive_count - negative_count
+    positive_count = 0
+    negative_count = 0
+    neutral_count = 0
+    for meme in liked_memes:
+        cur_meme = MEMES.find_one(meme.get("meme"))
+        sentiment = cur_meme.get("Sentiment")
+        print(sentiment)
+        # Check if sentiment exists and is a valid float
+        if sentiment is not None and isinstance(sentiment, (float, int)):
+            if sentiment > 0.5:
+                positive_count += 1
+            elif sentiment < 0.3:  # Stricter threshold for negative
+                negative_count += 1
+            else:
+                neutral_count += 1
+
+    # Debugging the sentiment counts
+    print(
+        f"Positive: {positive_count}, Negative: {negative_count}, Neutral: {neutral_count}"
+    )
 
     # Determine the personality label based on sentiment analysis
     if positive_count > negative_count:
@@ -376,6 +391,7 @@ def assign_personality(avg_sentiment, avg_upvotes, liked_memes):
         personality = "ISFJ" if avg_sentiment > 0.5 else "ISTJ"
 
     return personality, positive_count, negative_count, neutral_count
+
 
 @app.get(
     "/predict-personality/{user_id}",
@@ -393,7 +409,7 @@ async def predict_personality(user_id: str):
         user_data_list = list(USERS.find({}))
         meme_data_dict = {str(meme["_id"]): meme for meme in MEMES.find({})}
         subreddit_list = MEMES.distinct("Subreddit")
-
+        print(subreddit_list)
         # Check if we have enough users for classification
         if len(user_data_list) < 3:
             raise ValueError("Not enough users to perform classification")
@@ -418,9 +434,17 @@ async def predict_personality(user_id: str):
         for user in user_data_list:
             liked_memes = user["details"]["liked"]  # Accessing as dictionary
             # Extract features
-            avg_sentiment, avg_upvotes, *subreddit_vector, num_likes, sentiment_variance = extract_features(user, meme_data_dict, subreddit_list)
+            (
+                avg_sentiment,
+                avg_upvotes,
+                *subreddit_vector,
+                num_likes,
+                sentiment_variance,
+            ) = extract_features(user, meme_data_dict, subreddit_list)
             # Unpack personality assignment correctly
-            personality_label, pos_count, neg_count, neut_count = assign_personality(avg_sentiment, avg_upvotes, liked_memes)
+            personality_label, pos_count, neg_count, neut_count = assign_personality(
+                avg_sentiment, avg_upvotes, liked_memes
+            )
             y.append(personality_label)
             positive_counts.append(pos_count)
             negative_counts.append(neg_count)
@@ -444,7 +468,6 @@ async def predict_personality(user_id: str):
 
         # Prepare the response
         response = {
-            "user_id": str(user_id),
             "predicted_personality": predicted_personality,
             "positive_count": positive_counts[user_data_list.index(user_data)],
             "negative_count": negative_counts[user_data_list.index(user_data)],
@@ -452,8 +475,8 @@ async def predict_personality(user_id: str):
         }
 
         # Cache the response for future use
-        await set_cache_data(user_id, response, "personality", 10800)
-
+        # await set_cache_data(user_id, response, "personality", 10800)
+        print(response)
         return response
 
     except ValueError as e:
