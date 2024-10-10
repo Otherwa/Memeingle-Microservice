@@ -156,55 +156,6 @@ def recommend_memes(user_id: str, top_n: int = 20) -> List[str]:
     print("Reccommed 1")
     print(recommendations)
 
-    # * If not enough recommendations, widen the pool of similar users
-    similar_user_count = 13
-    while len(recommendations) < top_n and similar_user_count < len(user_similarity_df):
-        similar_user_count += 5
-        similar_users = get_top_n_similar_users(user_id, n=similar_user_count)
-        meme_scores = (
-            user_item_matrix.loc[similar_users].sum().sort_values(ascending=False)
-        )
-        new_recommendations = [
-            str(meme['_id']) for meme in meme_scores.index if meme not in liked_memes
-        ]
-        recommendations = list(
-            dict.fromkeys(recommendations + new_recommendations)
-        )  # * Remove duplicates and preserve order
-
-    # * Ensure there are at least 20 recommendations
-    recommendations = recommendations[:top_n]
-    print("Reccommed 2")
-    print(recommendations)
-
-    # * Fill up with random memes from the collection to make a total of 20 memes
-    remaining_count = top_n - len(recommendations)
-    if remaining_count > 0:
-        random_memes = list(MEMES.aggregate([{"$sample": {"size": remaining_count}}]))
-        random_memes = [
-            str(meme['_id'])
-            for meme in random_memes
-            if str(meme['_id']) not in liked_memes
-            and str(meme['_id']) not in recommendations
-        ]
-        recommendations += random_memes
-
-    print("Reccommed 3")
-    print(recommendations)
-
-    # * Ensure there are at least 20 memes
-    if len(recommendations) < top_n:
-        additional_random_memes = list(
-            MEMES.aggregate([{"$sample": {"size": top_n - len(recommendations)}}])
-        )
-        additional_random_memes = [
-            str(meme['_id'])
-            for meme in additional_random_memes
-            if str(meme['_id']) not in liked_memes
-            and str(meme['_id']) not in recommendations
-        ]
-        recommendations += additional_random_memes
-
-    print(recommendations)
     return recommendations[:top_n]
 
 
@@ -251,7 +202,7 @@ async def get_recommendations(user_id: str):
     recommendations = recommend_memes(user_id.strip(), top_n=34)
     response = {"user_id": user_id.strip(), "recommendations": recommendations}
 
-    await set_cache_data(cache_key, response, "likes")
+    await set_cache_data(cache_key, response, "likes",50)
     return response
 
 
