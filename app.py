@@ -165,7 +165,7 @@ def recommend_memes(user_id: str, top_n: int = 20) -> List[str]:
             user_item_matrix.loc[similar_users].sum().sort_values(ascending=False)
         )
         new_recommendations = [
-            str(meme["_id"]) for meme in meme_scores.index if meme not in liked_memes
+            str(meme) for meme in meme_scores.index if meme not in liked_memes
         ]
         recommendations = list(
             dict.fromkeys(recommendations + new_recommendations)
@@ -181,10 +181,10 @@ def recommend_memes(user_id: str, top_n: int = 20) -> List[str]:
     if remaining_count > 0:
         random_memes = list(MEMES.aggregate([{"$sample": {"size": remaining_count}}]))
         random_memes = [
-            str(meme["_id"])
+            str(meme)
             for meme in random_memes
-            if str(meme["_id"]) not in liked_memes
-            and str(meme["_id"]) not in recommendations
+            if str(meme) not in liked_memes
+            and str(meme) not in recommendations
         ]
         recommendations += random_memes
 
@@ -197,10 +197,10 @@ def recommend_memes(user_id: str, top_n: int = 20) -> List[str]:
             MEMES.aggregate([{"$sample": {"size": top_n - len(recommendations)}}])
         )
         additional_random_memes = [
-            str(meme["_id"])
+            str(meme)
             for meme in additional_random_memes
-            if str(meme["_id"]) not in liked_memes
-            and str(meme["_id"]) not in recommendations
+            if str(meme) not in liked_memes
+            and str(meme) not in recommendations
         ]
         recommendations += additional_random_memes
 
