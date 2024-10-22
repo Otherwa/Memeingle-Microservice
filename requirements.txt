@@ -4,4 +4,5 @@ fastapi==0.100.0
 numpy==1.24.3
 pymongo==4.3.3
 scikit-learn==1.5.0
-deta
+aioredis
+python-dotenv

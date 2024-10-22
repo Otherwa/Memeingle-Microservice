@@ -1,8 +1,11 @@
-from fastapi import FastAPI, HTTPException, Depends
+import aioredis
+from fastapi import FastAPI, HTTPException
 from pymongo import MongoClient
 
 from bson import json_util
 from bson.objectid import ObjectId
+
+
 
 import random
 import math
@@ -13,14 +16,49 @@ import pandas as pd
 from sklearn.metrics.pairwise import cosine_similarity
 from sklearn.preprocessing import MultiLabelBinarizer
 from sklearn.impute import SimpleImputer
-from collections import Counter
 from sklearn.ensemble import RandomForestClassifier
+from sklearn.metrics import accuracy_score, precision_score, recall_score, f1_score
 from fastapi.middleware.cors import CORSMiddleware
 from functools import cache
 from typing import List
-from deta import Deta
-from sklearn.tree import DecisionTreeClassifier
+from dotenv import load_dotenv
+import os
 
+# Load environment variables from .env file
+load_dotenv()
+
+
+# Async function to connect to Redis
+async def redis_connect():
+    try:
+        print(os.getenv("REDIS_URL"))
+        client = await aioredis.from_url(
+            os.getenv("REDIS_URL"),
+            encoding="utf-8",
+            decode_responses=True,
+        )
+        # Optionally, test the connection by pinging the server
+        await client.ping()
+        print("Successfully connected to Redis Cloud!")
+        return client
+    except aioredis.ResponseError as e:
+        print(f"Redis response error: {e}")
+        raise
+    except Exception as e:
+        print(f"Failed to connect to Redis: {e}")
+        raise
+
+
+# * ? Connect to MongoDB
+client = MongoClient(os.getenv("MONGO_URL"))
+db = client["Memeingle"]
+
+MEMES = db["memes"]
+USERS = db["users"]
+
+
+# Global Redis client
+redis_client = None
 
 app = FastAPI(
     title="Memeingle API",
@@ -43,55 +81,42 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-# * ? Initialize Deta with your project key
-DETA_PROJECT_KEY = "d0zuwufwggh_i5Y4sfgnP5YQg6imdd2zVqkqMRmUCCEC"
-deta = Deta(DETA_PROJECT_KEY)
 
-# * Create a Base instance
-cache_base_likes = deta.Base("user_likes")
-cache_base_similar = deta.Base("user_similar")
-cache_base_personality = deta.Base("user_personality")
+# Initialize Redis client
+@app.on_event("startup")
+async def startup():
+    global redis_client
+    redis_client = await redis_connect()
+
+
+# Close Redis client on shutdown
+@app.on_event("shutdown")
+async def shutdown():
+    await redis_client.close()
+
+
 CACHE_EXPIRE_IN_SECONDS = 200  # * 5 mins
 
-# * ? Connect to MongoDB
-client = MongoClient(
-    "mongodb+srv://atharvdesai:ahrAA7kOTdZfyur9@cluster0.smf3kdb.mongodb.net/Memeingle?retryWrites=true&w=majority&appName=Cluster0"
-)
-db = client["Memeingle"]
 
-MEMES = db["memes"]
-USERS = db["users"]
+# * Redis
 
 
-# * DETA
+# Function to generate Redis key
+def generate_redis_key(val, key):
+    return f"{val}:{key}"  # Example: "likes:123"
+
+
+# Get cached data from Redis
 async def get_cached_data(key, val):
-    if val == "likes":
-        data = cache_base_likes.get(key)
-        if data:
-            return data.get("value")
-    elif val == "similar":
-        data = cache_base_similar.get(key)
-        if data:
-            return data.get("value")
-    elif val == "personality":
-        data = cache_base_personality.get(key)
-        if data:
-            return data.get("value")
-    return None
+    redis_key = generate_redis_key(key, val)
+    data = await redis_client.get(redis_key)
+    return json.loads(data) if data else None
 
 
-async def set_cache_data(
-    key,
-    data,
-    val,
-    expire=CACHE_EXPIRE_IN_SECONDS,
-):
-    if val == "likes":
-        cache_base_likes.put({"key": key, "value": data}, key, expire_in=expire)
-    elif val == "similar":
-        cache_base_similar.put({"key": key, "value": data}, key, expire_in=expire)
-    elif val == "personality":
-        cache_base_personality.put({"key": key, "value": data}, key, expire_in=expire)
+# Set cache data in Redis
+async def set_cache_data(key, data, val, expire=CACHE_EXPIRE_IN_SECONDS):
+    redis_key = generate_redis_key(key, val)
+    await redis_client.set(redis_key, json.dumps(data), ex=expire)
 
 
 # * FAST-API
@@ -318,43 +343,70 @@ async def similar_users(user_id: str):
 
 
 # * Add the personality prediction route
-def extract_features(user_data, meme_data, subreddit_list):
-    """Extract relevant features from user and meme data."""
-    sentiment_scores = []
-    upvotes = []
-    subreddits = []
+def extract_features_generator(user_data, meme_data, subreddit_list):
+    """Yield relevant features from user and meme data one at a time."""
 
-    # Access "liked" directly from user_data as a dictionary
+    # Access "liked" memes directly from user_data
     for liked_meme in user_data["details"]["liked"]:
         meme_id = str(liked_meme["meme"])
         meme = meme_data.get(meme_id)
 
-        if meme and "Sentiment" in meme and "UpVotes" in meme and "Subreddit" in meme:
-            if not math.isnan(meme["Sentiment"]):
-                sentiment_scores.append(meme["Sentiment"])
-            if not math.isnan(meme["UpVotes"]):
-                upvotes.append(meme["UpVotes"])
-            subreddits.append(meme["Subreddit"])
+        if meme:
+            try:
+                # Extract and yield meme features if valid
+                sentiment = meme.get("Sentiment", np.nan)
+                upvote = meme.get("UpVotes", np.nan)
+                subreddit = meme.get("Subreddit", None)
 
-    # Calculate averages and variance
+                # Only yield valid data (non-NaN sentiment and upvotes, valid subreddit)
+                if not math.isnan(sentiment) and not math.isnan(upvote) and subreddit:
+                    subreddit_vector = [
+                        1 if subreddit == subr else 0 for subr in subreddit_list
+                    ]
+
+                    # Yield a feature tuple with sentiment, upvotes, and subreddit vector
+                    yield (sentiment, upvote, subreddit_vector)
+
+            except Exception as e:
+                # Log or handle any exceptions during extraction
+                print(f"Error processing meme {meme_id}: {e}")
+                continue
+
+
+def extract_user_features(user_data, meme_data, subreddit_list):
+    """Process all liked memes for a user and calculate feature summaries."""
+    sentiment_scores = []
+    upvotes = []
+    subreddit_vector_sums = [0] * len(subreddit_list)
+
+    # Use the generator to process each liked meme's features
+    for sentiment, upvote, subreddit_vector in extract_features_generator(
+        user_data, meme_data, subreddit_list
+    ):
+        sentiment_scores.append(sentiment)
+        upvotes.append(upvote)
+
+        # Sum the subreddit vectors for each meme
+        subreddit_vector_sums = [
+            sum(x) for x in zip(subreddit_vector_sums, subreddit_vector)
+        ]
+
+    # Calculate averages and variances
     avg_sentiment = np.mean(sentiment_scores) if sentiment_scores else 0
     avg_upvotes = np.mean(upvotes) if upvotes else 0
     sentiment_variance = np.var(sentiment_scores) if sentiment_scores else 0
-    most_common_subreddit = (
-        Counter(subreddits).most_common(1)[0][0] if subreddits else None
-    )
 
-    # Create subreddit vector
-    subreddit_vector = [
-        1 if most_common_subreddit == subreddit else 0 for subreddit in subreddit_list
+    # Create subreddit vector based on the highest subreddit score
+    most_common_subreddit_vector = [
+        1 if count > 0 else 0 for count in subreddit_vector_sums
     ]
 
-    # Create feature vector
+    # Create the feature vector
     feature_vector = [
         avg_sentiment,
         avg_upvotes,
-        *subreddit_vector,
-        len(sentiment_scores),
+        *most_common_subreddit_vector,
+        len(sentiment_scores),  # number of memes liked
         sentiment_variance,
     ]
 
@@ -414,6 +466,7 @@ async def predict_personality(user_id: str):
         meme_data_dict = {str(meme["_id"]): meme for meme in MEMES.find({})}
         subreddit_list = MEMES.distinct("Subreddit")
         print(subreddit_list)
+
         # Check if we have enough users for classification
         if len(user_data_list) < 3:
             raise ValueError("Not enough users to perform classification")
@@ -424,9 +477,9 @@ async def predict_personality(user_id: str):
             raise HTTPException(status_code=404, detail="User not found")
 
         # Extract features for the target user and all users
-        X_user = extract_features(user_data, meme_data_dict, subreddit_list)
+        X_user = extract_user_features(user_data, meme_data_dict, subreddit_list)
         X = [
-            extract_features(user, meme_data_dict, subreddit_list)
+            extract_user_features(user, meme_data_dict, subreddit_list)
             for user in user_data_list
         ]
 
@@ -436,15 +489,15 @@ async def predict_personality(user_id: str):
         negative_counts = []
         neutral_counts = []
         for user in user_data_list:
-            liked_memes = user["details"]["liked"]  # Accessing as dictionary
-            # Extract features
+            liked_memes = user["details"]["liked"]
             (
                 avg_sentiment,
                 avg_upvotes,
                 *subreddit_vector,
                 num_likes,
                 sentiment_variance,
-            ) = extract_features(user, meme_data_dict, subreddit_list)
+            ) = extract_user_features(user, meme_data_dict, subreddit_list)
+
             # Unpack personality assignment correctly
             personality_label, pos_count, neg_count, neut_count = assign_personality(
                 avg_sentiment, avg_upvotes, liked_memes
@@ -466,7 +519,18 @@ async def predict_personality(user_id: str):
         clf = RandomForestClassifier(n_estimators=100, random_state=42)
         clf.fit(X_imputed, y)
 
-        # Step 3: Predict personality for the target user
+        # Step 3: Evaluate the model (train set performance)
+        y_pred = clf.predict(X_imputed)
+
+        # Accuracy
+        accuracy = accuracy_score(y, y_pred)
+
+        # Precision, Recall, F1-Score (macro average, assuming multiclass classification)
+        precision = precision_score(y, y_pred, average="macro")
+        recall = recall_score(y, y_pred, average="macro")
+        f1 = f1_score(y, y_pred, average="macro")
+
+        # Step 4: Predict personality for the target user
         X_user_imputed = imputer.transform([X_user])
         predicted_personality = clf.predict(X_user_imputed)[0]
 
@@ -476,13 +540,18 @@ async def predict_personality(user_id: str):
             "positive_count": positive_counts[user_data_list.index(user_data)],
             "negative_count": negative_counts[user_data_list.index(user_data)],
             "neutral_count": neutral_counts[user_data_list.index(user_data)],
+            "metrics": {
+                "accuracy": accuracy,
+                "precision": precision,
+                "recall": recall,
+                "f1_score": f1,
+            },
         }
 
         # Cache the response for future use
         await set_cache_data(user_id, response, "personality", 800)
         print(response)
         return response
-
     except ValueError as e:
         raise HTTPException(status_code=400, detail=str(e))
     except Exception as e:
