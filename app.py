@@ -1,10 +1,8 @@
-import aioredis
 from fastapi import FastAPI, HTTPException
 from pymongo import MongoClient
 
 from bson import json_util
 from bson.objectid import ObjectId
-
 
 
 import random
@@ -13,6 +11,7 @@ import numpy as np
 import json
 import pandas as pd
 
+import redis
 from sklearn.metrics.pairwise import cosine_similarity
 from sklearn.preprocessing import MultiLabelBinarizer
 from sklearn.impute import SimpleImputer
@@ -29,19 +28,18 @@ load_dotenv()
 
 
 # Async function to connect to Redis
-async def redis_connect():
+def redis_connect():
     try:
-        print(os.getenv("REDIS_URL"))
-        client = await aioredis.from_url(
-            os.getenv("REDIS_URL"),
-            encoding="utf-8",
-            decode_responses=True,
+        client = redis.Redis(
+            host=os.getenv("REDIS_HOST"),
+            port=os.getenv("REDIS_PORT"),
+            password=os.getenv("REDIS_PASS"),
         )
         # Optionally, test the connection by pinging the server
-        await client.ping()
+        client.ping()
         print("Successfully connected to Redis Cloud!")
         return client
-    except aioredis.ResponseError as e:
+    except redis.ResponseError as e:
         print(f"Redis response error: {e}")
         raise
     except Exception as e:
@@ -86,13 +84,13 @@ app.add_middleware(
 @app.on_event("startup")
 async def startup():
     global redis_client
-    redis_client = await redis_connect()
+    redis_client = redis_connect()
 
 
 # Close Redis client on shutdown
 @app.on_event("shutdown")
 async def shutdown():
-    await redis_client.close()
+    redis_client.close()
 
 
 CACHE_EXPIRE_IN_SECONDS = 200  # * 5 mins
