@@ -30,7 +30,7 @@ load_dotenv()
 # Async function to connect to Redis
 def redis_connect():
     try:
-        client = redis.Redis(
+        client = redis.StrictRedis(
             host=os.getenv("REDIS_HOST"),
             port=os.getenv("REDIS_PORT"),
             password=os.getenv("REDIS_PASS"),
@@ -80,18 +80,12 @@ app.add_middleware(
 )
 
 
-# Initialize Redis client
-@app.on_event("startup")
-async def startup():
+def initialize_redis():
     global redis_client
     redis_client = redis_connect()
 
 
-# Close Redis client on shutdown
-@app.on_event("shutdown")
-async def shutdown():
-    redis_client.close()
-
+initialize_redis()
 
 CACHE_EXPIRE_IN_SECONDS = 200  # * 5 mins
 
@@ -104,17 +98,21 @@ def generate_redis_key(val, key):
     return f"{val}:{key}"  # Example: "likes:123"
 
 
-# Get cached data from Redis
-async def get_cached_data(key, val):
+def get_cached_data(key, val):
     redis_key = generate_redis_key(key, val)
-    data = await redis_client.get(redis_key)
-    return json.loads(data) if data else None
+    try:
+        data = redis_client.get(redis_key)
+        print(data)
+        return json.loads(data) if data else None
+    except Exception as e:
+        print(f"Error getting cached data: {e}")
+        return None
 
 
 # Set cache data in Redis
-async def set_cache_data(key, data, val, expire=CACHE_EXPIRE_IN_SECONDS):
+def set_cache_data(key, data, val, expire=CACHE_EXPIRE_IN_SECONDS):
     redis_key = generate_redis_key(key, val)
-    await redis_client.set(redis_key, json.dumps(data), ex=expire)
+    redis_client.set(redis_key, json.dumps(data), ex=expire)
 
 
 # * FAST-API
@@ -270,7 +268,8 @@ async def list_user():
 )
 async def get_recommendations(user_id: str):
     cache_key = f"recommendations:{user_id}"
-    cached_data = await get_cached_data(cache_key, "likes")
+    print(cache_key)
+    cached_data = get_cached_data(cache_key, "likes")
     if cached_data:
         print(cached_data)
         return cached_data
@@ -278,7 +277,7 @@ async def get_recommendations(user_id: str):
     recommendations = recommend_memes(user_id.strip(), top_n=34)
     response = {"user_id": user_id.strip(), "recommendations": recommendations}
 
-    await set_cache_data(cache_key, response, "likes")
+    set_cache_data(cache_key, response, "likes")
     return response
 
 
