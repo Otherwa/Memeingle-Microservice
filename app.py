@@ -13,6 +13,7 @@ import pandas as pd
 
 import redis
 from sklearn.metrics.pairwise import cosine_similarity
+from sklearn.model_selection import train_test_split
 from sklearn.preprocessing import MultiLabelBinarizer
 from sklearn.impute import SimpleImputer
 from sklearn.ensemble import RandomForestClassifier
@@ -302,7 +303,7 @@ async def similar_users(user_id: str):
 
     # * Check cache first
     cache_key = f"similar:{user_id}"
-    cached_data = await get_cached_data(cache_key, "similar")
+    cached_data = get_cached_data(cache_key, "similar")
     if cached_data:
         print("Cache Hit")
         return cached_data
@@ -334,7 +335,7 @@ async def similar_users(user_id: str):
     result = {"user": str_user_id, "data": top_5_similar_users.to_dict()}
     print(result)
     # * Cache the result
-    await set_cache_data(cache_key, result, "similar", CACHE_EXPIRE_IN_SECONDS)
+    set_cache_data(cache_key, result, "similar", CACHE_EXPIRE_IN_SECONDS)
 
     return result
 
@@ -453,7 +454,7 @@ def assign_personality(avg_sentiment, avg_upvotes, liked_memes):
 )
 async def predict_personality(user_id: str):
     # Check if the personality data is cached
-    cached_data = await get_cached_data(user_id, "personality")
+    cached_data = get_cached_data(user_id, "personality")
     if cached_data:
         return cached_data
 
@@ -495,6 +496,10 @@ async def predict_personality(user_id: str):
                 sentiment_variance,
             ) = extract_user_features(user, meme_data_dict, subreddit_list)
 
+            print(*subreddit_vector)
+            print(num_likes)
+            print(sentiment_variance)
+
             # Unpack personality assignment correctly
             personality_label, pos_count, neg_count, neut_count = assign_personality(
                 avg_sentiment, avg_upvotes, liked_memes
@@ -508,26 +513,29 @@ async def predict_personality(user_id: str):
         if len(set(y)) < 2:
             raise ValueError("Not enough labeled users for classification")
 
-        # Step 1: Handle missing values
+        # Handle missing values
         imputer = SimpleImputer(strategy="mean")
         X_imputed = imputer.fit_transform(X)
 
-        # Step 2: Train Random Forest Classifier
+        # Train-test split
+        X_train, X_test, y_train, y_test = train_test_split(
+            X_imputed, y, test_size=0.3, random_state=42
+        )
+
+        # Train Random Forest Classifier
         clf = RandomForestClassifier(n_estimators=100, random_state=42)
-        clf.fit(X_imputed, y)
+        clf.fit(X_train, y_train)
 
-        # Step 3: Evaluate the model (train set performance)
-        y_pred = clf.predict(X_imputed)
+        # Evaluate the model on the test set
+        y_pred = clf.predict(X_test)
 
-        # Accuracy
-        accuracy = accuracy_score(y, y_pred)
+        # Calculate evaluation metrics
+        accuracy = accuracy_score(y_test, y_pred)
+        precision = precision_score(y_test, y_pred, average="macro")
+        recall = recall_score(y_test, y_pred, average="macro")
+        f1 = f1_score(y_test, y_pred, average="macro")
 
-        # Precision, Recall, F1-Score (macro average, assuming multiclass classification)
-        precision = precision_score(y, y_pred, average="macro")
-        recall = recall_score(y, y_pred, average="macro")
-        f1 = f1_score(y, y_pred, average="macro")
-
-        # Step 4: Predict personality for the target user
+        # Predict personality for the target user
         X_user_imputed = imputer.transform([X_user])
         predicted_personality = clf.predict(X_user_imputed)[0]
 
@@ -546,9 +554,10 @@ async def predict_personality(user_id: str):
         }
 
         # Cache the response for future use
-        await set_cache_data(user_id, response, "personality", 800)
+        set_cache_data(user_id, response, "personality", 800)
         print(response)
         return response
+
     except ValueError as e:
         raise HTTPException(status_code=400, detail=str(e))
     except Exception as e:
