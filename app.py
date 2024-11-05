@@ -127,7 +127,7 @@ def set_cache_data(key, data, val, expire=CACHE_EXPIRE_IN_SECONDS):
 
 global_model = RandomForestClassifier(n_estimators=50, random_state=42)
 imputer = SimpleImputer(strategy="mean")
-
+accuracy = None
 # * FAST-API
 
 
@@ -381,11 +381,10 @@ def extract_user_features_optimized(user_data, meme_data, subreddit_list):
     feature_vector = [
         avg_sentiment,
         avg_upvotes,
-        *most_common_subreddit_vector,
+        *most_common_subreddit_vector,  # Ensure this part always has the same length
         len(sentiment_scores),
         sentiment_variance,
     ]
-
     return np.nan_to_num(feature_vector).tolist()
 
 
@@ -420,6 +419,7 @@ def retrain_model():
     """Retrain the global model every 30 minutes."""
     global global_model
     global imputer
+    global accuracy
 
     logger.info("Retraining the model...")
 
@@ -457,17 +457,16 @@ def retrain_model():
     new_model.fit(X_train, y_train)
     global_model = new_model  # Update global model
 
-    print(
-        "Model retrained with accuracy:",
-        accuracy_score(y_test, global_model.predict(X_test)),
-    )
-
+    accuracy = accuracy_score(y_test, global_model.predict(X_test))
+    print("Model retrained with accuracy:", accuracy)
     logger.info("Model retraining completed successfully.")
+    return accuracy
 
 
 @app.get("/predict-personality/{user_id}")
 async def predict_personality(user_id: str):
     global imputer
+    global accuracy
 
     cached_data = get_cached_data(user_id, "personality")
 
@@ -491,7 +490,7 @@ async def predict_personality(user_id: str):
         try:
             check_is_fitted(global_model)
         except:
-            retrain_model()
+            accuracy = retrain_model()
 
         # Predict personality
 
@@ -514,6 +513,7 @@ async def predict_personality(user_id: str):
             "negative_count": negative_count,
             "neutral_count": neutral_count,
             "metrics": {
+                "accuracy": accuracy,
                 "average_sentiment": avg_sentiment,
                 "average_upvotes": avg_upvotes,
                 "sentiment_variance": X_user[
