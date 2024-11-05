@@ -1,17 +1,22 @@
 from fastapi import FastAPI, HTTPException
 from pymongo import MongoClient
+import redis
+import logging
+
 
 from bson import json_util
 from bson.objectid import ObjectId
 
+from concurrent.futures import ThreadPoolExecutor, as_completed
+from apscheduler.schedulers.background import BackgroundScheduler
 
 import random
 import math
 import numpy as np
 import json
-import pandas as pd
 
-import redis
+import pandas as pd
+from sklearn.base import check_is_fitted
 from sklearn.metrics.pairwise import cosine_similarity
 from sklearn.model_selection import train_test_split
 from sklearn.preprocessing import MultiLabelBinarizer
@@ -26,6 +31,9 @@ import os
 
 # Load environment variables from .env file
 load_dotenv()
+
+logging.basicConfig(level=logging.INFO)
+logger = logging.getLogger(__name__)
 
 
 # Async function to connect to Redis
@@ -72,6 +80,7 @@ app = FastAPI(
     ],
 )
 
+
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["*"],
@@ -115,6 +124,9 @@ def set_cache_data(key, data, val, expire=CACHE_EXPIRE_IN_SECONDS):
     redis_key = generate_redis_key(key, val)
     redis_client.set(redis_key, json.dumps(data), ex=expire)
 
+
+global_model = RandomForestClassifier(n_estimators=50, random_state=42)
+imputer = SimpleImputer(strategy="mean")
 
 # * FAST-API
 
@@ -340,103 +352,60 @@ async def similar_users(user_id: str):
     return result
 
 
-# * Add the personality prediction route
-def extract_features_generator(user_data, meme_data, subreddit_list):
-    """Yield relevant features from user and meme data one at a time."""
+# Function to extract features (optimized version from previous)
+def extract_user_features_optimized(user_data, meme_data, subreddit_list):
+    """Optimized feature extraction for a user."""
+    sentiment_scores = []
+    upvotes = []
+    subreddit_vector_sums = np.zeros(len(subreddit_list), dtype=int)
 
-    # Access "liked" memes directly from user_data
     for liked_meme in user_data["details"]["liked"]:
         meme_id = str(liked_meme["meme"])
         meme = meme_data.get(meme_id)
 
         if meme:
-            try:
-                # Extract and yield meme features if valid
-                sentiment = meme.get("Sentiment", np.nan)
-                upvote = meme.get("UpVotes", np.nan)
-                subreddit = meme.get("Subreddit", None)
+            sentiment = meme.get("Sentiment", np.nan)
+            upvote = meme.get("UpVotes", np.nan)
+            subreddit = meme.get("Subreddit", None)
 
-                # Only yield valid data (non-NaN sentiment and upvotes, valid subreddit)
-                if not math.isnan(sentiment) and not math.isnan(upvote) and subreddit:
-                    subreddit_vector = [
-                        1 if subreddit == subr else 0 for subr in subreddit_list
-                    ]
+            if not np.isnan(sentiment) and not np.isnan(upvote) and subreddit:
+                sentiment_scores.append(sentiment)
+                upvotes.append(upvote)
+                subreddit_vector_sums[subreddit_list.index(subreddit)] += 1
 
-                    # Yield a feature tuple with sentiment, upvotes, and subreddit vector
-                    yield (sentiment, upvote, subreddit_vector)
-
-            except Exception as e:
-                # Log or handle any exceptions during extraction
-                print(f"Error processing meme {meme_id}: {e}")
-                continue
-
-
-def extract_user_features(user_data, meme_data, subreddit_list):
-    """Process all liked memes for a user and calculate feature summaries."""
-    sentiment_scores = []
-    upvotes = []
-    subreddit_vector_sums = [0] * len(subreddit_list)
-
-    # Use the generator to process each liked meme's features
-    for sentiment, upvote, subreddit_vector in extract_features_generator(
-        user_data, meme_data, subreddit_list
-    ):
-        sentiment_scores.append(sentiment)
-        upvotes.append(upvote)
-
-        # Sum the subreddit vectors for each meme
-        subreddit_vector_sums = [
-            sum(x) for x in zip(subreddit_vector_sums, subreddit_vector)
-        ]
-
-    # Calculate averages and variances
     avg_sentiment = np.mean(sentiment_scores) if sentiment_scores else 0
     avg_upvotes = np.mean(upvotes) if upvotes else 0
     sentiment_variance = np.var(sentiment_scores) if sentiment_scores else 0
+    most_common_subreddit_vector = (subreddit_vector_sums > 0).astype(int).tolist()
 
-    # Create subreddit vector based on the highest subreddit score
-    most_common_subreddit_vector = [
-        1 if count > 0 else 0 for count in subreddit_vector_sums
-    ]
-
-    # Create the feature vector
     feature_vector = [
         avg_sentiment,
         avg_upvotes,
         *most_common_subreddit_vector,
-        len(sentiment_scores),  # number of memes liked
+        len(sentiment_scores),
         sentiment_variance,
     ]
 
-    return [0 if math.isnan(feature) else feature for feature in feature_vector]
+    return np.nan_to_num(feature_vector).tolist()
 
 
-def assign_personality(avg_sentiment, avg_upvotes, liked_memes):
-    """Assign personality label based on average sentiment, upvotes, and specific meme data."""
-
-    # Initialize counters for different sentiment ranges
+def assign_personality(avg_sentiment, avg_upvotes, liked_memes, meme_data):
     positive_count = 0
     negative_count = 0
     neutral_count = 0
+
     for meme in liked_memes:
-        cur_meme = MEMES.find_one(meme.get("meme"))
+        cur_meme = meme_data.get(str(meme.get("meme")))
         sentiment = cur_meme.get("Sentiment")
-        print(sentiment)
-        # Check if sentiment exists and is a valid float
+
         if sentiment is not None and isinstance(sentiment, (float, int)):
             if sentiment > 0.5:
                 positive_count += 1
-            elif sentiment < 0.3:  # Stricter threshold for negative
+            elif sentiment < 0.3:
                 negative_count += 1
             else:
                 neutral_count += 1
 
-    # Debugging the sentiment counts
-    print(
-        f"Positive: {positive_count}, Negative: {negative_count}, Neutral: {neutral_count}"
-    )
-
-    # Determine the personality label based on sentiment analysis
     if positive_count > negative_count:
         personality = "ENFP" if avg_upvotes > 1000 else "ESFJ"
     elif negative_count > positive_count:
@@ -447,119 +416,115 @@ def assign_personality(avg_sentiment, avg_upvotes, liked_memes):
     return personality, positive_count, negative_count, neutral_count
 
 
-@app.get(
-    "/predict-personality/{user_id}",
-    summary="Predict the personality of a user",
-    description="Returns the predicted personality type for the specified user.",
-)
+def retrain_model():
+    """Retrain the global model every 30 minutes."""
+    global global_model
+    global imputer
+
+    logger.info("Retraining the model...")
+
+    user_data_list = list(USERS.find({}))
+    meme_data_dict = {str(meme["_id"]): meme for meme in MEMES.find({})}
+    subreddit_list = MEMES.distinct("Subreddit")
+
+    # Ensure we have enough data
+    if len(user_data_list) < 3:
+        return
+
+    # Collect features and labels
+    X = []
+    y = []
+
+    for user in user_data_list:
+        features = extract_user_features_optimized(user, meme_data_dict, subreddit_list)
+        personality, _, _, _ = assign_personality(
+            features[0], features[1], user["details"]["liked"], meme_data_dict
+        )
+        X.append(features)
+        y.append(personality)
+
+    # Impute and train
+
+    X_imputed = imputer.fit_transform(X)
+
+    # Split data and train
+    X_train, X_test, y_train, y_test = train_test_split(
+        X_imputed, y, test_size=0.3, random_state=42
+    )
+
+    # Lock the model while updating it
+    new_model = RandomForestClassifier(n_estimators=50, random_state=42)
+    new_model.fit(X_train, y_train)
+    global_model = new_model  # Update global model
+
+    print(
+        "Model retrained with accuracy:",
+        accuracy_score(y_test, global_model.predict(X_test)),
+    )
+
+    logger.info("Model retraining completed successfully.")
+
+
+@app.get("/predict-personality/{user_id}")
 async def predict_personality(user_id: str):
-    # Check if the personality data is cached
+    global imputer
+
     cached_data = get_cached_data(user_id, "personality")
+
     if cached_data:
         return cached_data
 
     try:
-        # Fetch all users and memes data
-        user_data_list = list(USERS.find({}))
-        meme_data_dict = {str(meme["_id"]): meme for meme in MEMES.find({})}
-        subreddit_list = MEMES.distinct("Subreddit")
-        print(subreddit_list)
-
-        # Check if we have enough users for classification
-        if len(user_data_list) < 3:
-            raise ValueError("Not enough users to perform classification")
-
-        # Find the target user data
         user_data = USERS.find_one({"_id": ObjectId(user_id)})
         if not user_data:
             raise HTTPException(status_code=404, detail="User not found")
 
-        # Extract features for the target user and all users
-        X_user = extract_user_features(user_data, meme_data_dict, subreddit_list)
-        X = [
-            extract_user_features(user, meme_data_dict, subreddit_list)
-            for user in user_data_list
-        ]
+        meme_data_dict = {str(meme["_id"]): meme for meme in MEMES.find({})}
+        subreddit_list = MEMES.distinct("Subreddit")
 
-        # Assign personality labels based on interactions with memes
-        y = []
-        positive_counts = []
-        negative_counts = []
-        neutral_counts = []
-        for user in user_data_list:
-            liked_memes = user["details"]["liked"]
-            (
-                avg_sentiment,
-                avg_upvotes,
-                *subreddit_vector,
-                num_likes,
-                sentiment_variance,
-            ) = extract_user_features(user, meme_data_dict, subreddit_list)
-
-            print(*subreddit_vector)
-            print(num_likes)
-            print(sentiment_variance)
-
-            # Unpack personality assignment correctly
-            personality_label, pos_count, neg_count, neut_count = assign_personality(
-                avg_sentiment, avg_upvotes, liked_memes
-            )
-            y.append(personality_label)
-            positive_counts.append(pos_count)
-            negative_counts.append(neg_count)
-            neutral_counts.append(neut_count)
-
-        # Check for sufficient unique labels for classification
-        if len(set(y)) < 2:
-            raise ValueError("Not enough labeled users for classification")
-
-        # Handle missing values
-        imputer = SimpleImputer(strategy="mean")
-        X_imputed = imputer.fit_transform(X)
-
-        # Train-test split
-        X_train, X_test, y_train, y_test = train_test_split(
-            X_imputed, y, test_size=0.3, random_state=42
+        # Extract features for the target user
+        X_user = extract_user_features_optimized(
+            user_data, meme_data_dict, subreddit_list
         )
 
-        # Train Random Forest Classifier
-        clf = RandomForestClassifier(n_estimators=100, random_state=42)
-        clf.fit(X_train, y_train)
+        # Ensure the global model is fitted; if not, retrain it
+        try:
+            check_is_fitted(global_model)
+        except:
+            retrain_model()
 
-        # Evaluate the model on the test set
-        y_pred = clf.predict(X_test)
+        # Predict personality
 
-        # Calculate evaluation metrics
-        accuracy = accuracy_score(y_test, y_pred)
-        precision = precision_score(y_test, y_pred, average="macro")
-        recall = recall_score(y_test, y_pred, average="macro")
-        f1 = f1_score(y_test, y_pred, average="macro")
+        X_user_imputed = imputer.transform(
+            [X_user]
+        )  # Changed to `transform` instead of `fit_transform`
+        predicted_personality = global_model.predict(X_user_imputed)[0]
 
-        # Predict personality for the target user
-        X_user_imputed = imputer.transform([X_user])
-        predicted_personality = clf.predict(X_user_imputed)[0]
+        # Assign metrics for positive, negative, and neutral counts
+        avg_sentiment = X_user[0]
+        avg_upvotes = X_user[1]
+        personality, positive_count, negative_count, neutral_count = assign_personality(
+            avg_sentiment, avg_upvotes, user_data["details"]["liked"], meme_data_dict
+        )
 
-        # Prepare the response
+        # Prepare the response with metrics included
         response = {
             "predicted_personality": predicted_personality,
-            "positive_count": positive_counts[user_data_list.index(user_data)],
-            "negative_count": negative_counts[user_data_list.index(user_data)],
-            "neutral_count": neutral_counts[user_data_list.index(user_data)],
+            "positive_count": positive_count,
+            "negative_count": negative_count,
+            "neutral_count": neutral_count,
             "metrics": {
-                "accuracy": accuracy,
-                "precision": precision,
-                "recall": recall,
-                "f1_score": f1,
+                "average_sentiment": avg_sentiment,
+                "average_upvotes": avg_upvotes,
+                "sentiment_variance": X_user[
+                    -1
+                ],  # Last element in X_user is sentiment variance
             },
         }
 
-        # Cache the response for future use
         set_cache_data(user_id, response, "personality", 800)
-        print(response)
         return response
 
-    except ValueError as e:
-        raise HTTPException(status_code=400, detail=str(e))
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"An error occurred: {str(e)}")
 
@@ -568,3 +533,8 @@ if __name__ == "__main__":
     import uvicorn
 
     uvicorn.run(app, host="0.0.0.0", port=8000)
+    logger.info("Starting FastAPI application...")
+    # Set up a scheduler to retrain the model every 30 minutes
+    scheduler = BackgroundScheduler()
+    scheduler.add_job(retrain_model, "interval", minutes=30)
+    scheduler.start()
